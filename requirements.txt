@@ -1,0 +1,23 @@
+# Core language & math
+numpy
+
+# PDF processing
+PyMuPDF==1.23.9
+
+# OCR
+pytesseract==0.3.10
+Pillow==10.2.0
+
+# Deep learning
+torch>=2.0.0
+
+# Hugging Face ecosystem
+transformers>=4.36.0
+sentencepiece>=0.1.99
+accelerate>=0.25.0
+
+# Agentic orchestration
+langgraph>=0.0.30
+
+# Optional (for JSON handling & safety)
+pydantic>=2.0.0
