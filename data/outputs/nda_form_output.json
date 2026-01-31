@@ -1,0 +1,8 @@
+{
+  "form": "NDA_Form",
+  "fields": {
+    "effective_date": null,
+    "termination_notice": "This is a sample termination notice.",
+    "governing_law": null
+  }
+}
