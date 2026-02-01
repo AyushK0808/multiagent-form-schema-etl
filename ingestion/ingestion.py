@@ -74,9 +74,9 @@ class PDFIngester:
             page_blocks = self._process_page(page, page_idx, metadata)
             blocks.extend(page_blocks)
         
-        doc.close()
-        logger.info(f"Ingested {len(blocks)} blocks from {len(doc)} pages")
         
+        logger.info(f"Ingested {len(blocks)} blocks from {len(doc)} pages")
+        doc.close()
         return blocks, metadata
     
     def _process_page(self, page, page_idx: int, metadata: Dict) -> List[DocumentBlock]:
