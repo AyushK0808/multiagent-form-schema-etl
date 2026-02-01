@@ -154,7 +154,8 @@ class ContractOrchestrator:
             recovered_data, remaining_errors = self.validator.validate_and_recover(
                 form.fields,
                 state["schema"],
-                state["clause_graph"]
+                state["clause_graph"],
+                page_image=state.get("page_image")  # Pass page_image for Gemini recovery
             )
             
             # Update form with recovered values

@@ -5,6 +5,10 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 import logging
+from google import genai
+from google.genai import types
+
+from config.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -213,16 +217,42 @@ class ValidationRecoveryManager:
     
     def __init__(self):
         self.validator = FieldValidator()
+        config = get_config()
+        logger.info(f"Initializing recovery strategies. Gemini API Key available: {bool(config.model.gemini_api_key)}")
+        
         self.recovery_strategies = [
             DefaultValueRecovery(),
-            RetryRecovery()
         ]
+        
+        # Try to add Gemini recovery if API key is available
+        if config.model.gemini_api_key:
+            try:
+                gemini_recovery = GeminiVisionRecovery()
+                self.recovery_strategies.append(gemini_recovery)
+                logger.info("[Gemini] Successfully initialized GeminiVisionRecovery")
+            except ValueError as e:
+                logger.warning(f"[Gemini] Could not initialize Gemini recovery: {e}")
+            except Exception as e:
+                logger.error(f"[Gemini] Unexpected error initializing Gemini: {e}")
+        else:
+            logger.info("[Gemini] No Gemini API key available, skipping Gemini recovery")
+        
+        # Add Retry recovery last
+        self.recovery_strategies.append(RetryRecovery())
+        
+        logger.info(f"Loaded {len(self.recovery_strategies)} recovery strategies: {[s.__class__.__name__ for s in self.recovery_strategies]}")
     
     def validate_and_recover(self, form_data: Dict, schema: Dict, 
-                            clause_graph: Dict) -> Tuple[Dict, List[str]]:
+                            clause_graph: Dict, page_image=None) -> Tuple[Dict, List[str]]:
         """
         Validate form data and attempt recovery for errors.
         
+        Args:
+            form_data: Form fields to validate
+            schema: Schema definition
+            clause_graph: Document structure
+            page_image: PIL Image for vision-based recovery
+            
         Returns:
             Tuple of (recovered_data, remaining_errors)
         """
@@ -239,24 +269,98 @@ class ValidationRecoveryManager:
         context = {
             "schema": schema,
             "clause_graph": clause_graph,
-            "form_data": form_data
+            "form_data": form_data,
+            "page_image": page_image  # Critical for multi-modal recovery
         }
         
         for error in errors:
             # Parse field name from error message
             field_name = error.split(":")[0].strip()
+            logger.debug(f"Attempting recovery for field '{field_name}': {error}")
             
             # Try recovery strategies
             recovered = False
             for strategy in self.recovery_strategies:
-                value = strategy.recover(field_name, error, context)
-                if value is not None:
-                    recovered_data[field_name] = value
-                    recovered = True
-                    logger.info(f"Recovered {field_name} using {strategy.__class__.__name__}")
+                logger.debug(f"  Trying {strategy.__class__.__name__}...")
+                try:
+                    value = strategy.recover(field_name, error, context)
+                    if value is not None:
+                        recovered_data[field_name] = value
+                        recovered = True
+                        logger.info(f"✓ Recovered '{field_name}' = {value} using {strategy.__class__.__name__}")
+                        break
+                except Exception as e:
+                    logger.warning(f"  {strategy.__class__.__name__} failed: {e}")
                     break
             
             if not recovered:
                 remaining_errors.append(error)
         
         return recovered_data, remaining_errors
+    
+class GeminiVisionRecovery(RecoveryStrategy):
+    """Uses Gemini API to extract missing data directly from the image."""
+    
+    def __init__(self):
+        config = get_config()
+        api_key = config.model.gemini_api_key
+        if not api_key:
+            raise ValueError("Gemini API key is empty")
+        logger.info(f"[Gemini] Initializing with model: {config.model.gemini_model}")
+        self.client = genai.Client(api_key=api_key)
+        self.model_id = config.model.gemini_model
+        logger.info("[Gemini] Client initialized successfully")
+
+    def recover(self, field_name: str, error: str, context: Dict) -> Optional[Any]:
+        page_image = context.get("page_image")
+        schema = context.get("schema", {})
+        
+        if not page_image:
+            logger.debug(f"[Gemini] No page_image in context, skipping recovery for {field_name}")
+            return None
+        
+        logger.info(f"[Gemini] Recovering '{field_name}' from image...")
+
+        field_meta = schema.get("fields", {}).get(field_name, {})
+        
+        # Build a targeted prompt for the missing field
+        prompt = f"""Extract the value for '{field_name}' from the attached document image.
+Field Description: {field_meta.get('description', 'Data field')}
+Expected Type: {field_meta.get('type', 'string')}
+Return ONLY a JSON object: {{"{field_name}": "value"}}"""
+
+        try:
+            logger.debug(f"[Gemini] Sending request to {self.model_id} with image type: {type(page_image)}")
+            response = self.client.models.generate_content(
+                model=self.model_id,
+                contents=[page_image, prompt],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
+            
+            logger.debug(f"[Gemini] Received response for {field_name}")
+            result = response.parsed  # SDK automatically parses JSON if response_mime_type is set
+            extracted_value = result.get(field_name) if result else None
+            
+            if extracted_value:
+                logger.info(f"[Gemini] ✓ Successfully extracted '{field_name}': {extracted_value}")
+            else:
+                logger.debug(f"[Gemini] No value extracted for '{field_name}'")
+            
+            return extracted_value
+            
+        except Exception as e:
+            logger.error(f"[Gemini] Vision recovery failed for {field_name}: {e}")
+            import traceback
+            logger.debug(f"[Gemini] Traceback: {traceback.format_exc()}")
+            return None
+            
+class ValidationRecoveryManager:
+    def __init__(self):
+        self.validator = FieldValidator()
+        self.recovery_strategies = [
+            DefaultValueRecovery(),
+            GeminiVisionRecovery(), # Add Gemini as a high-tier recovery option
+            RetryRecovery()
+        ]

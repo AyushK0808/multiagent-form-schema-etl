@@ -6,6 +6,7 @@ pytesseract
 Pillow
 spacy
 python-dateutil
+python-dotenv
 langgraph
 langchain
 numpy
@@ -19,3 +20,5 @@ seaborn
 pytest
 black
 flake8
+google-genai
+ollama
