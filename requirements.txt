@@ -1,23 +1,36 @@
-# Core language & math
-numpy
+# Core dependencies
+torch>=2.0.0
+transformers>=4.35.0
+accelerate>=0.20.0
 
-# PDF processing
-PyMuPDF==1.23.9
+# Document processing
+PyMuPDF>=1.23.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
 
-# OCR
-pytesseract==0.3.10
-Pillow==10.2.0
+# NLP
+spacy>=3.7.0
+python-dateutil>=2.8.2
 
-# Deep learning
-torch
+# Orchestration
+langgraph>=0.0.20
+langchain>=0.1.0
 
-# Hugging Face ecosystem
-transformers>=4.36.0
-sentencepiece>=0.1.99
-accelerate>=0.25.0
+# Utilities
+numpy>=1.24.0
+pandas>=2.0.0
+tqdm>=4.65.0
 
-# Agentic orchestration
-langgraph>=0.0.30
-
-# Optional (for JSON handling & safety)
+# Validation
+jsonschema>=4.17.0
 pydantic>=2.0.0
+
+# Evaluation
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Development
+pytest>=7.4.0
+black>=23.0.0
+flake8>=6.0.0
