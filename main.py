@@ -4,7 +4,9 @@ Simplified main entrypoint: run the full pipeline on a single NDA PDF
 Behavior:
 - Looks for `data/raw/NDA.pdf`; if not found, falls back to
   `data/raw/sample_contract_form.pdf` if available.
-- Runs the existing pipeline and writes output to configured output dir.
+- Runs the existing pipeline and writes:
+  - Intermediate phase outputs to data/intermediate/
+  - Final extraction to configured output dir
 """
 import json
 import logging
@@ -27,14 +29,30 @@ def setup_directories():
     cfg = get_config()
     for p in [cfg.paths.raw_dir, cfg.paths.output_dir, cfg.paths.schema_dir, cfg.paths.test_dir]:
         p.mkdir(parents=True, exist_ok=True)
+    
+    # Create intermediate dir for phase outputs
+    intermediate_dir = Path("data") / "intermediate"
+    intermediate_dir.mkdir(parents=True, exist_ok=True)
 
 
 def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name: str = "NDA_Form") -> dict:
     logger.info(f"Processing: {pdf_path}")
+    
+    intermediate_dir = Path("data") / "intermediate"
 
     # Ingest PDF
     logger.info("Ingesting PDF...")
     blocks, metadata = ingest_pdf(str(pdf_path))
+    
+    # Save ingestion output
+    ingest_output = {
+        "num_blocks": len(blocks),
+        "metadata": metadata,
+        "blocks_preview": [{"text": b.get("text", "")[:100], "bbox": b.get("bbox")} for b in blocks[:10]]
+    }
+    with open(intermediate_dir / "01_ingestion.json", "w", encoding="utf-8") as f:
+        json.dump(ingest_output, f, indent=2)
+    logger.info(f"Saved ingestion output to data/intermediate/01_ingestion.json")
 
     # Load first page image for layout analysis
     doc = fitz.open(str(pdf_path))
@@ -52,8 +70,43 @@ def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name:
         "output": {}
     }
 
+    # Run orchestrator (which has multiple phases)
     orchestrator = get_orchestrator()
     final_state = orchestrator.process(state)
+    
+    # Save intermediate phase outputs
+    layout_output = {
+        "num_clauses": len(final_state.get("clause_graph", {})),
+        "layout_predictions": final_state.get("layout_predictions", [])[:5]  # Preview
+    }
+    with open(intermediate_dir / "02_layout_analysis.json", "w", encoding="utf-8") as f:
+        json.dump(layout_output, f, indent=2)
+    logger.info("Saved layout analysis output to data/intermediate/02_layout_analysis.json")
+    
+    schema_output = {
+        "form_name": final_state.get("schema", {}).get("form_name", "Unknown"),
+        "num_fields": len(final_state.get("schema", {}).get("fields", []))
+    }
+    with open(intermediate_dir / "03_schema.json", "w", encoding="utf-8") as f:
+        json.dump(schema_output, f, indent=2)
+    logger.info("Saved schema output to data/intermediate/03_schema.json")
+    
+    # Extract and validation happen in final_state
+    extraction_output = {
+        "num_fields_extracted": len(final_state.get("form", {}).fields) if final_state.get("form") else 0,
+        "is_complete": final_state.get("form", {}).is_complete() if final_state.get("form") else False
+    }
+    with open(intermediate_dir / "04_extraction.json", "w", encoding="utf-8") as f:
+        json.dump(extraction_output, f, indent=2)
+    logger.info("Saved extraction output to data/intermediate/04_extraction.json")
+    
+    validation_output = {
+        "errors": final_state.get("errors", []),
+        "warnings": final_state.get("warnings", [])
+    }
+    with open(intermediate_dir / "05_validation.json", "w", encoding="utf-8") as f:
+        json.dump(validation_output, f, indent=2)
+    logger.info("Saved validation output to data/intermediate/05_validation.json")
 
     output_data = final_state.get("output", {})
 
@@ -65,7 +118,7 @@ def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name:
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2)
 
-    logger.info(f"Saved extraction to: {output_path}")
+    logger.info(f"Saved final extraction to: {output_path}")
     return output_data
 
 

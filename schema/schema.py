@@ -74,40 +74,65 @@ DEFAULT_NDA_SCHEMA = {
             "description": "Date when the agreement becomes effective",
             "section": "Effective",
             "required": True,
-            "examples": ["2024-01-15", "2023-12-01"]
+            "examples": ["2024-01-15", "2023-12-01"],
+            "keywords": ["effective", "effective date", "becomes effective", "effective on"],
+            "patterns": [
+                r"effective\s+(?:on\s+)?(?:as of\s+)?([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{4})"
+            ]
         },
         "termination_notice": {
             "type": "string",
             "description": "Notice period for termination",
             "section": "Termination",
             "required": False,
-            "examples": ["30 days", "60 days written notice"]
+            "examples": ["30 days", "60 days written notice"],
+            "keywords": ["termination", "notice", "notice period", "days notice"],
+            "patterns": [
+                r"(?:termination|notice)\s+(?:notice\s+)?(?:period\s+)?[:\-]?\s*([0-9]+\s+(?:days?|months?|years?)(?:\s+(?:written\s+)?notice)?)"
+            ]
         },
         "governing_law": {
             "type": "string",
             "description": "Jurisdiction whose laws govern the agreement",
             "section": "Governing",
             "required": True,
-            "examples": ["State of California", "New York"]
+            "examples": ["State of California", "New York"],
+            "keywords": ["governing law", "governed by", "governed under", "jurisdiction", "laws of"],
+            "patterns": [
+                r"(?:governed by|subject to|laws of|jurisdiction of)\s+(?:the\s+)?([A-Za-z\s]+?)(?:\.|,|;|and)",
+                r"([A-Za-z]+\s+(?:law|jurisdiction))"
+            ]
         },
         "disclosing_party": {
             "type": "string",
             "description": "Party disclosing confidential information",
             "section": "Parties",
-            "required": True
+            "required": True,
+            "keywords": ["disclosing party", "discloser", "provider", "owner"],
+            "patterns": [
+                r"(?:disclosing party|discloser|provider|owner)\s+(?:means\s+)?[:\"]?\s*([A-Za-z\s&\(\)]+?)(?:\"|,|;|and)",
+            ]
         },
         "receiving_party": {
             "type": "string",
             "description": "Party receiving confidential information",
             "section": "Parties",
-            "required": True
+            "required": True,
+            "keywords": ["receiving party", "recipient", "receiver"],
+            "patterns": [
+                r"(?:receiving party|recipient|receiver)\s+(?:means\s+)?[:\"]?\s*([A-Za-z\s&\(\)]+?)(?:\"|,|;|and)",
+            ]
         },
         "confidentiality_period": {
             "type": "string",
             "description": "Duration of confidentiality obligation",
             "section": "Confidentiality",
             "required": False,
-            "examples": ["5 years", "indefinite"]
+            "examples": ["5 years", "indefinite"],
+            "keywords": ["confidentiality period", "duration", "years", "maintain confidentiality"],
+            "patterns": [
+                r"(?:for a period of|confidentiality period of|maintain.*for)\s+(\d+\s+years?|indefinite)"
+            ]
         }
     }
 }

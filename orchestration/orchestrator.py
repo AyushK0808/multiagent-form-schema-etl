@@ -111,9 +111,13 @@ class ContractOrchestrator:
         logger.info("Extracting fields...")
         
         try:
+            # Build full text from blocks for regex extraction
+            full_text = " ".join([str(b.get("text", "")) for b in state.get("blocks", [])])
+            
             form = self.form_filler.populate(
                 state["clause_graph"],
-                state["schema"]
+                state["schema"],
+                full_text=full_text
             )
             
             state["form"] = form
