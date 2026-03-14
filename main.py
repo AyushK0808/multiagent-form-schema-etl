@@ -20,8 +20,8 @@ from config.config import get_config, update_config
 from ingestion.ingestion import ingest_pdf
 from orchestration.orchestrator import get_orchestrator
 from schema.schema import load_schema
-from extraction.gemini_extractor import GeminiDirectExtractor
-from extraction.llama_extractor import LlamaDirectExtractor
+# from extraction.gemini_extractor import GeminiDirectExtractor
+# from extraction.llama_extractor import LlamaDirectExtractor
 
 from PIL import Image
 import fitz
@@ -46,10 +46,10 @@ def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name:
     logger.info(f"Processing: {pdf_path}")
     
     method = "Full Pipeline"
-    if use_gemini:
-        method = "Gemini Vision"
-    elif use_llama:
-        method = "Llama 3.2 Vision (Ollama)"
+    # if use_gemini:
+    #     method = "Gemini Vision"
+    # elif use_llama:
+    #     method = "Llama 3.2 Vision (Ollama)"
     
     logger.info(f"Using extraction method: {method}")
     
@@ -71,79 +71,79 @@ def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name:
         return {}
     
     # Use Gemini direct extraction if requested
-    if use_gemini:
-        try:
-            logger.info("Starting Gemini direct extraction...")
-            extractor = GeminiDirectExtractor()
-            extracted_fields = extractor.extract(page_image, schema)
+    # if use_gemini:
+    #     try:
+    #         logger.info("Starting Gemini direct extraction...")
+    #         extractor = GeminiDirectExtractor()
+    #         extracted_fields = extractor.extract(page_image, schema)
             
-            # Format output
-            output_data = {
-                "form": form_name,
-                "fields": extracted_fields,
-                "extraction_method": "gemini_vision",
-                "is_complete": all(v is not None for v in extracted_fields.values()),
-                "pipeline_metadata": {
-                    "extraction_timestamp": __import__("datetime").datetime.now().isoformat(),
-                    "num_fields": len(extracted_fields),
-                    "num_fields_extracted": sum(1 for v in extracted_fields.values() if v is not None)
-                }
-            }
+    #         # Format output
+    #         output_data = {
+    #             "form": form_name,
+    #             "fields": extracted_fields,
+    #             "extraction_method": "gemini_vision",
+    #             "is_complete": all(v is not None for v in extracted_fields.values()),
+    #             "pipeline_metadata": {
+    #                 "extraction_timestamp": __import__("datetime").datetime.now().isoformat(),
+    #                 "num_fields": len(extracted_fields),
+    #                 "num_fields_extracted": sum(1 for v in extracted_fields.values() if v is not None)
+    #             }
+    #         }
             
-            if output_path is None:
-                cfg = get_config()
-                output_path = cfg.paths.output_dir / f"extracted_gemini_{pdf_path.stem}.json"
+    #         if output_path is None:
+    #             cfg = get_config()
+    #             output_path = cfg.paths.output_dir / f"extracted_gemini_{pdf_path.stem}.json"
             
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(output_data, f, indent=2)
+    #         output_path.parent.mkdir(parents=True, exist_ok=True)
+    #         with open(output_path, "w", encoding="utf-8") as f:
+    #             json.dump(output_data, f, indent=2)
             
-            logger.info(f"Saved Gemini extraction to: {output_path}")
-            return output_data
+    #         logger.info(f"Saved Gemini extraction to: {output_path}")
+    #         return output_data
             
-        except Exception as e:
-            logger.error(f"Gemini extraction failed: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            sys.exit(1)
+    #     except Exception as e:
+    #         logger.error(f"Gemini extraction failed: {e}")
+    #         import traceback
+    #         logger.debug(traceback.format_exc())
+    #         sys.exit(1)
     
-    # Use Llama direct extraction if requested
-    if use_llama:
-        try:
-            logger.info("Starting Llama 3.2 direct extraction (local Ollama)...")
-            logger.info("Ensure Ollama is running: ollama pull llama2-vision && ollama serve")
-            extractor = LlamaDirectExtractor()
-            extracted_fields = extractor.extract(page_image, schema)
+    # # Use Llama direct extraction if requested
+    # if use_llama:
+    #     try:
+    #         logger.info("Starting Llama 3.2 direct extraction (local Ollama)...")
+    #         logger.info("Ensure Ollama is running: ollama pull llama2-vision && ollama serve")
+    #         extractor = LlamaDirectExtractor()
+    #         extracted_fields = extractor.extract(page_image, schema)
             
-            # Format output
-            output_data = {
-                "form": form_name,
-                "fields": extracted_fields,
-                "extraction_method": "llama_vision_ollama",
-                "is_complete": all(v is not None for v in extracted_fields.values()),
-                "pipeline_metadata": {
-                    "extraction_timestamp": __import__("datetime").datetime.now().isoformat(),
-                    "num_fields": len(extracted_fields),
-                    "num_fields_extracted": sum(1 for v in extracted_fields.values() if v is not None)
-                }
-            }
+    #         # Format output
+    #         output_data = {
+    #             "form": form_name,
+    #             "fields": extracted_fields,
+    #             "extraction_method": "llama_vision_ollama",
+    #             "is_complete": all(v is not None for v in extracted_fields.values()),
+    #             "pipeline_metadata": {
+    #                 "extraction_timestamp": __import__("datetime").datetime.now().isoformat(),
+    #                 "num_fields": len(extracted_fields),
+    #                 "num_fields_extracted": sum(1 for v in extracted_fields.values() if v is not None)
+    #             }
+    #         }
             
-            if output_path is None:
-                cfg = get_config()
-                output_path = cfg.paths.output_dir / f"extracted_llama_{pdf_path.stem}.json"
+    #         if output_path is None:
+    #             cfg = get_config()
+    #             output_path = cfg.paths.output_dir / f"extracted_llama_{pdf_path.stem}.json"
             
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(output_data, f, indent=2)
+    #         output_path.parent.mkdir(parents=True, exist_ok=True)
+    #         with open(output_path, "w", encoding="utf-8") as f:
+    #             json.dump(output_data, f, indent=2)
             
-            logger.info(f"Saved Llama extraction to: {output_path}")
-            return output_data
+    #         logger.info(f"Saved Llama extraction to: {output_path}")
+    #         return output_data
             
-        except Exception as e:
-            logger.error(f"Llama extraction failed: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            sys.exit(1)
+    #     except Exception as e:
+    #         logger.error(f"Llama extraction failed: {e}")
+    #         import traceback
+    #         logger.debug(traceback.format_exc())
+    #         sys.exit(1)
     
     # Standard pipeline extraction
     # Ingest PDF
@@ -431,17 +431,17 @@ def main():
         description="NDA Extraction - Pipeline, Gemini Vision, or Llama 3.2 Vision"
     )
     
-    parser.add_argument(
-        '--use-gemini',
-        action='store_true',
-        help='Use Gemini vision for direct extraction'
-    )
+    # parser.add_argument(
+    #     '--use-gemini',
+    #     action='store_true',
+    #     help='Use Gemini vision for direct extraction'
+    # )
     
-    parser.add_argument(
-        '--use-llama',
-        action='store_true',
-        help='Use Llama 3.2 vision for direct extraction (requires local Ollama)'
-    )
+    # parser.add_argument(
+    #     '--use-llama',
+    #     action='store_true',
+    #     help='Use Llama 3.2 vision for direct extraction (requires local Ollama)'
+    # )
     
     parser.add_argument(
         '--form',
@@ -471,8 +471,8 @@ def main():
     try:
         result = extract_contract(
             pdf_to_process,
-            use_gemini=args.use_gemini,
-            use_llama=args.use_llama,
+            # use_gemini=args.use_gemini,
+            # use_llama=args.use_llama,
             form_name=args.form
         )
         print(json.dumps(result.get("fields", {}), indent=2))
