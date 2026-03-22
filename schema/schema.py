@@ -1,5 +1,8 @@
 """
 Schema management for contract forms.
+
+Schemas describe WHAT to extract (field name, type, description, examples).
+HOW to extract it is entirely the LLM's job — no patterns or keywords here.
 """
 import json
 from pathlib import Path
@@ -9,52 +12,45 @@ from config.config import get_config
 
 logger = logging.getLogger(__name__)
 
+
 class SchemaManager:
     """Manages form schemas for different document types."""
-    
+
     def __init__(self, schema_dir: Optional[Path] = None):
         config = get_config()
         self.schema_dir = schema_dir or config.paths.schema_dir
-        self._schemas = {}
+        self._schemas: Dict[str, Dict] = {}
         self._load_schemas()
-    
+
     def _load_schemas(self):
-        """Load all schemas from schema directory."""
         if not self.schema_dir.exists():
             logger.warning(f"Schema directory not found: {self.schema_dir}")
             return
-        
         for schema_file in self.schema_dir.glob("*.json"):
             try:
-                with open(schema_file, 'r') as f:
+                with open(schema_file) as f:
                     schema = json.load(f)
-                    schema_name = schema.get("form_name", schema_file.stem)
-                    self._schemas[schema_name] = schema
-                    logger.info(f"Loaded schema: {schema_name}")
+                name = schema.get("form_name", schema_file.stem)
+                self._schemas[name] = schema
+                logger.info(f"Loaded schema: {name}")
             except Exception as e:
                 logger.error(f"Failed to load schema {schema_file}: {e}")
-    
+
     def get_schema(self, form_name: str) -> Optional[Dict]:
-        """Get schema by form name."""
         return self._schemas.get(form_name)
-    
+
     def list_schemas(self) -> List[str]:
-        """List available schema names."""
         return list(self._schemas.keys())
-    
+
     def add_schema(self, schema: Dict) -> bool:
-        """Add or update a schema."""
         form_name = schema.get("form_name")
         if not form_name:
             logger.error("Schema missing 'form_name' field")
             return False
-        
         self._schemas[form_name] = schema
-        
-        # Optionally save to disk
         schema_file = self.schema_dir / f"{form_name}.json"
         try:
-            with open(schema_file, 'w') as f:
+            with open(schema_file, "w") as f:
                 json.dump(schema, f, indent=2)
             logger.info(f"Saved schema: {form_name}")
             return True
@@ -63,7 +59,10 @@ class SchemaManager:
             return False
 
 
-# Default schemas
+# ---------------------------------------------------------------------------
+# Default schemas — lean, description-focused, no regex / keyword hints
+# ---------------------------------------------------------------------------
+
 DEFAULT_NDA_SCHEMA = {
     "form_name": "NDA_Form",
     "version": "1.0",
@@ -71,70 +70,44 @@ DEFAULT_NDA_SCHEMA = {
     "fields": {
         "effective_date": {
             "type": "date",
-            "description": "Date when the agreement becomes effective",
-            "section": "Effective",
+            "description": "The date on which the agreement becomes effective",
             "required": True,
             "examples": ["2024-01-15", "2023-12-01"],
-            "keywords": ["effective", "effective date", "becomes effective", "effective on"],
-            "patterns": [
-                r"effective\s+(?:on\s+)?(?:as of\s+)?([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{4})"
-            ]
         },
         "termination_notice": {
             "type": "string",
-            "description": "Notice period for termination",
-            "section": "Termination",
+            "description": "The required notice period to terminate the agreement",
             "required": False,
             "examples": ["30 days", "60 days written notice"],
-            "keywords": ["termination", "notice", "notice period", "days notice"],
-            "patterns": [
-                r"(?:termination|notice)\s+(?:notice\s+)?(?:period\s+)?[:\-]?\s*([0-9]+\s+(?:days?|months?|years?)(?:\s+(?:written\s+)?notice)?)"
-            ]
         },
         "governing_law": {
             "type": "string",
-            "description": "Jurisdiction whose laws govern the agreement",
-            "section": "Governing",
+            "description": (
+                "The jurisdiction or state whose laws govern the agreement "
+                "(the actual jurisdiction name, not the heading 'Governing Law')"
+            ),
             "required": True,
-            "examples": ["State of California", "New York"],
-            "keywords": ["governing law", "governed by", "governed under", "jurisdiction", "laws of"],
-            "patterns": [
-                r"(?:governed by|subject to|laws of|jurisdiction of)\s+(?:the\s+)?([A-Za-z\s]+?)(?:\.|,|;|and)",
-                r"([A-Za-z]+\s+(?:law|jurisdiction))"
-            ]
+            "examples": ["State of California", "New York", "England and Wales"],
         },
         "disclosing_party": {
             "type": "string",
-            "description": "Party disclosing confidential information",
-            "section": "Parties",
+            "description": "Full legal name of the party disclosing confidential information",
             "required": True,
-            "keywords": ["disclosing party", "discloser", "provider", "owner"],
-            "patterns": [
-                r"(?:disclosing party|discloser|provider|owner)\s+(?:means\s+)?[:\"]?\s*([A-Za-z\s&\(\)]+?)(?:\"|,|;|and)",
-            ]
+            "examples": ["Acme Corporation", "John Smith"],
         },
         "receiving_party": {
             "type": "string",
-            "description": "Party receiving confidential information",
-            "section": "Parties",
+            "description": "Full legal name of the party receiving confidential information",
             "required": True,
-            "keywords": ["receiving party", "recipient", "receiver"],
-            "patterns": [
-                r"(?:receiving party|recipient|receiver)\s+(?:means\s+)?[:\"]?\s*([A-Za-z\s&\(\)]+?)(?:\"|,|;|and)",
-            ]
+            "examples": ["Beta Inc.", "Jane Doe"],
         },
         "confidentiality_period": {
             "type": "string",
-            "description": "Duration of confidentiality obligation",
-            "section": "Confidentiality",
+            "description": "How long the confidentiality obligation lasts",
             "required": False,
             "examples": ["5 years", "indefinite"],
-            "keywords": ["confidentiality period", "duration", "years", "maintain confidentiality"],
-            "patterns": [
-                r"(?:for a period of|confidentiality period of|maintain.*for)\s+(\d+\s+years?|indefinite)"
-            ]
-        }
-    }
+        },
+    },
 }
 
 DEFAULT_EMPLOYMENT_SCHEMA = {
@@ -144,84 +117,73 @@ DEFAULT_EMPLOYMENT_SCHEMA = {
     "fields": {
         "employee_name": {
             "type": "string",
-            "section": "Parties",
-            "required": True
+            "description": "Full legal name of the employee",
+            "required": True,
         },
         "employer_name": {
             "type": "string",
-            "section": "Parties",
-            "required": True
+            "description": "Full legal name of the employer or company",
+            "required": True,
         },
         "start_date": {
             "type": "date",
-            "section": "Employment Period",
-            "required": True
+            "description": "The date employment begins",
+            "required": True,
         },
         "position": {
             "type": "string",
-            "section": "Position",
-            "required": True
+            "description": "Job title or role of the employee",
+            "required": True,
         },
         "salary": {
             "type": "currency",
-            "section": "Compensation",
+            "description": "Annual salary with currency code",
             "required": True,
-            "examples": ["USD 75000", "EUR 60000"]
+            "examples": ["USD 75000", "EUR 60000"],
         },
         "vacation_days": {
             "type": "number",
-            "section": "Benefits",
+            "description": "Number of paid vacation days per year",
             "required": False,
-            "constraints": {"min": 0, "max": 365}
-        }
-    }
+            "constraints": {"min": 0, "max": 365},
+        },
+    },
 }
 
 
+# ---------------------------------------------------------------------------
+# Public helpers
+# ---------------------------------------------------------------------------
+
 def load_schema(form_name: str = "NDA_Form") -> Dict:
-    """
-    Load schema by name or return default.
-    
-    Args:
-        form_name: Name of the form schema
-        
-    Returns:
-        Schema dictionary
-    """
+    """Load schema by name, falling back to built-in defaults."""
     manager = SchemaManager()
     schema = manager.get_schema(form_name)
-    
     if schema:
         return schema
-    
-    # Return default schemas
     defaults = {
         "NDA_Form": DEFAULT_NDA_SCHEMA,
-        "Employment_Agreement": DEFAULT_EMPLOYMENT_SCHEMA
+        "Employment_Agreement": DEFAULT_EMPLOYMENT_SCHEMA,
     }
-    
     return defaults.get(form_name, DEFAULT_NDA_SCHEMA)
 
 
-def create_schema_file(form_name: str, output_dir: Optional[Path] = None):
-    """Create a schema file from default templates."""
+def create_schema_file(form_name: str, output_dir: Optional[Path] = None) -> bool:
+    """Write a built-in schema template to disk."""
     config = get_config()
     output_dir = output_dir or config.paths.schema_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    
     defaults = {
         "NDA_Form": DEFAULT_NDA_SCHEMA,
-        "Employment_Agreement": DEFAULT_EMPLOYMENT_SCHEMA
+        "Employment_Agreement": DEFAULT_EMPLOYMENT_SCHEMA,
     }
-    
     schema = defaults.get(form_name)
     if not schema:
         logger.error(f"No default schema for: {form_name}")
         return False
-    
     output_path = output_dir / f"{form_name}.json"
     try:
-        with open(output_path, 'w') as f:
+        with open(output_path, "w") as f:
             json.dump(schema, f, indent=2)
         logger.info(f"Created schema file: {output_path}")
         return True

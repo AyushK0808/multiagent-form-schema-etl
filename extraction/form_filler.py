@@ -1,226 +1,281 @@
 """
-Form population with schema-guided extraction and validation.
+Form population pipeline:
+
+  1. Text LLM  — send full document text + schema, get JSON back.
+  2. Vision LLM fallback — for any field still None after step 1,
+     re-run extraction using a local vision model (Ollama) against
+     the page image.
+  3. Final sentinel — any field still None after both passes is set
+     to the string "NaN" so callers always receive a complete record.
 """
-from typing import Dict, Any, List, Optional
+import json
 import logging
+import re
+from typing import Any, Dict, Optional
+
 from utils.form import FormInstance
-from extraction.extraction import LLMExtractor
 from config.config import get_config
 
 logger = logging.getLogger(__name__)
 
+# Sentinel used when both extraction passes fail for a field
+_MISSING = "NaN"
+
+
 class FormFiller:
-    """Handles form population from clause graph using schema."""
-    
-    def __init__(self):
-        self.extractor = LLMExtractor()
+    """
+    Populates a form using:
+      - Pass 1: text LLM (fast, works on native-text PDFs)
+      - Pass 2: vision LLM via Ollama (fallback for fields that came back null)
+    """
+
+    def __init__(self, vision_model: str = "llama3.2-vision"):
         self.config = get_config()
-    
-    def populate(self, clause_graph: Dict[str, str], schema: Dict, full_text: str = "") -> FormInstance:
+        model_cfg = self.config.model
+
+        self.model_name = model_cfg.llm_model
+        self.temperature = model_cfg.llm_temperature
+        self.max_tokens = model_cfg.llm_max_tokens
+        self.vision_model = vision_model
+
+        # Wire up the text LLM backend
+        if self.model_name.startswith("ollama/"):
+            self.ollama_model = self.model_name.replace("ollama/", "")
+            self._text_call = self._call_ollama
+        else:
+            from transformers import pipeline as hf_pipeline
+            self._hf = hf_pipeline(
+                "text-generation",
+                model=self.model_name,
+                temperature=self.temperature,
+                max_new_tokens=self.max_tokens,
+                device_map=model_cfg.device,
+            )
+            self._text_call = self._call_hf
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def populate(self, clause_graph: Dict[str, str], schema: Dict,
+                 full_text: str = "",
+                 page_image=None) -> FormInstance:
         """
-        Populate form fields from clause graph.
-        
+        Populate every form field with a three-pass strategy.
+
         Args:
             clause_graph: Hierarchical clause structure
-            schema: Field schema definition
-            full_text: Optional full text of document for regex extraction
-            
+            schema:       Field schema definition
+            full_text:    Full plain-text of the document
+            page_image:   PIL Image of the document page (used for vision fallback)
+
         Returns:
-            Populated FormInstance
+            Populated FormInstance — every field is either a real value or "NaN"
         """
         form = FormInstance(schema)
-        
         logger.info(f"Populating form: {schema.get('form_name', 'Unknown')}")
-        
-        # If full_text not provided, build from clause_graph
-        if not full_text and clause_graph:
-            # Join all clause text
-            full_text = " ".join([str(v) for v in clause_graph.values()])
-        
-        for field_name, field_meta in schema["fields"].items():
-            value = self._extract_field(field_name, field_meta, clause_graph, full_text)
-            
-            # Apply validation if enabled
-            if self.config.enable_validation:
-                value = self._validate_field(field_name, value, field_meta)
-            
-            form.fill(field_name, value)
-            
-            logger.debug(f"Field '{field_name}': {value}")
-        
+
+        document_text = full_text or " ".join(str(v) for v in clause_graph.values())
+
+        # ── Pass 1: text LLM ──────────────────────────────────────────
+        extracted: Dict[str, Any] = {}
+        if document_text.strip():
+            logger.info("Pass 1: text LLM extraction")
+            prompt = self._build_text_prompt(document_text, schema)
+            raw = self._text_call(prompt)
+            extracted = self._parse_response(raw, schema)
+            _log_pass_result(extracted, pass_name="text LLM")
+        else:
+            logger.warning("Pass 1 skipped — no document text available")
+            extracted = {name: None for name in schema["fields"]}
+
+        # ── Pass 2: vision LLM for null fields ───────────────────────
+        null_fields = [k for k, v in extracted.items() if v is None]
+        if null_fields and page_image is not None:
+            logger.info(
+                f"Pass 2: vision LLM fallback for {len(null_fields)} null field(s): "
+                f"{', '.join(null_fields)}"
+            )
+            vision_result = self._vision_extract(page_image, schema, null_fields)
+            for field in null_fields:
+                if vision_result.get(field) is not None:
+                    extracted[field] = vision_result[field]
+                    logger.info(f"  [vision] filled '{field}': {vision_result[field]!r}")
+            _log_pass_result(extracted, pass_name="vision LLM")
+        elif null_fields and page_image is None:
+            logger.warning(
+                "Pass 2 skipped — no page_image provided. "
+                "Pass page_image= to FormFiller.populate() to enable vision fallback."
+            )
+
+        # ── Pass 3: sentinel for still-missing fields ─────────────────
+        for field_name, value in extracted.items():
+            form.fill(field_name, value if value is not None else _MISSING)
+
+        null_after = [k for k, v in form.fields.items() if v == _MISSING]
+        if null_after:
+            logger.warning(f"Fields set to '{_MISSING}' (not found by any pass): {null_after}")
+
         return form
-    
-    def _extract_field(self, field_name: str, field_meta: Dict, 
-                      clause_graph: Dict[str, str], full_text: str = "") -> Any:
-        """Extract a single field value."""
-        
-        import re
-        from datetime import datetime
-        
-        section_key = field_meta.get("section", "")
-        field_type = field_meta.get("type", "string")
-        examples = field_meta.get("examples", None)
-        patterns = field_meta.get("patterns", None)
-        keywords = field_meta.get("keywords", [])
-        
-        # Use full_text for extraction if available
-        search_text = full_text or self._find_context(section_key, clause_graph)
-        
-        # First, try regex-based extraction if patterns are provided
-        if patterns and search_text:
-            for pattern in (patterns if isinstance(patterns, list) else [patterns]):
-                match = re.search(pattern, search_text, re.IGNORECASE | re.DOTALL)
-                if match:
-                    value = match.group(1) if match.groups() else match.group(0)
-                    logger.info(f"Regex matched {field_name}: {value}")
-                    return self._parse_value(value, field_type)
-        
-        # Try keyword-based extraction
-        if keywords and search_text:
-            for keyword in keywords:
-                value = self._extract_by_keyword(field_name, keyword, search_text, field_type)
-                if value is not None:
-                    logger.info(f"Keyword matched {field_name}: {value}")
-                    return value
-        
-        # Fallback to LLM-based extraction
-        context_text = search_text or self._find_context(section_key, clause_graph)
-        
-        if not context_text:
-            logger.warning(f"No context found for field '{field_name}' in section '{section_key}'")
-            return None
-        
-        # Extract using LLM
-        return self.extractor.extract_field(
-            field_name=field_name,
-            field_type=field_type,
-            context_text=context_text,
-            examples=examples
+
+    # ------------------------------------------------------------------
+    # Pass 1 — text LLM
+    # ------------------------------------------------------------------
+
+    def _build_text_prompt(self, document_text: str, schema: Dict) -> str:
+        field_lines, skeleton = _schema_to_prompt_parts(schema)
+
+        system = (
+            "You are a precise data-extraction engine. "
+            "Read the document and fill in every field listed below.\n"
+            "Rules:\n"
+            "- Output ONLY a single valid JSON object — no prose, no markdown fences.\n"
+            "- If a field value is not present in the document, use null.\n"
+            "- For dates use ISO format YYYY-MM-DD when possible.\n"
+            "- For numbers return only the numeric value.\n"
+            "- For booleans return true or false.\n"
+            "- Never invent values that are not in the document."
         )
-    
-    def _find_context(self, section_key: str, clause_graph: Dict[str, str]) -> str:
-        """Find relevant context text from clause graph."""
-        
-        # Direct match
-        if section_key in clause_graph:
-            return clause_graph[section_key]
-        
-        # Fuzzy match - find sections containing the key
-        matching_sections = []
-        for key, text in clause_graph.items():
-            if section_key.lower() in key.lower() or section_key.lower() in text.lower():
-                matching_sections.append(text)
-        
-        # Combine matching sections
-        return " ".join(matching_sections) if matching_sections else ""
-    
-    def _extract_by_keyword(self, field_name: str, keyword: str, context: str, field_type: str) -> Any:
-        """Extract value by finding a keyword and capturing following text."""
-        import re
-        
-        # Build pattern: keyword followed by optional punctuation/words, then capture value
-        patterns = [
-            rf"{keyword}\s*[:=]\s*([^\n\.;,]+)",  # "keyword: value" or "keyword=value"
-            rf"{keyword}\s+([^\n\.;,]+)",  # "keyword value"
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                value = match.group(1).strip()
-                if value and value.lower() != "n/a":
-                    logger.debug(f"{field_name} extracted by keyword '{keyword}': {value}")
-                    return self._parse_value(value, field_type)
-        
+        user = (
+            f"DOCUMENT:\n\"\"\"\n{document_text[:4000]}\n\"\"\"\n\n"
+            f"FIELDS TO EXTRACT:\n{field_lines}\n\n"
+            f"Return a JSON object with exactly these keys:\n{skeleton}"
+        )
+
+        if "llama" in self.model_name.lower() or self.model_name.startswith("ollama/"):
+            return (
+                f"<|start_header_id|>system<|end_header_id|>\n\n{system}"
+                f"<|start_header_id|>user<|end_header_id|>\n\n{user}"
+                f"<|start_header_id|>assistant<|end_header_id|>\n\n"
+            )
+        return f"<|system|>\n{system}\n</s>\n<|user|>\n{user}\n</s>\n<|assistant|>\n"
+
+    def _call_ollama(self, prompt: str) -> str:
+        import ollama
+        response = ollama.generate(
+            model=self.ollama_model,
+            prompt=prompt,
+            stream=False,
+            options={
+                "temperature": self.temperature,
+                "num_predict": max(self.max_tokens, 512),
+            },
+        )
+        return response["response"]
+
+    def _call_hf(self, prompt: str) -> str:
+        outputs = self._hf(prompt)
+        return outputs[0]["generated_text"]
+
+    # ------------------------------------------------------------------
+    # Pass 2 — vision LLM
+    # ------------------------------------------------------------------
+
+    def _vision_extract(self, page_image, schema: Dict,
+                        target_fields: list) -> Dict[str, Any]:
+        """
+        Run the vision LLM on *target_fields* only.
+        Returns a dict; fields not in target_fields are absent from the result.
+        """
+        try:
+            from extraction.llama_extractor import LlamaVisionExtractor
+            extractor = LlamaVisionExtractor(model=self.vision_model)
+
+            # Build a sub-schema containing only the null fields so the
+            # vision model focuses its attention and returns a smaller JSON.
+            sub_schema = {
+                **schema,
+                "fields": {k: v for k, v in schema["fields"].items()
+                           if k in target_fields},
+            }
+            return extractor.extract(page_image, sub_schema)
+
+        except Exception as exc:
+            logger.error(f"[VisionLLM] Pass 2 failed: {exc}")
+            return {}
+
+    # ------------------------------------------------------------------
+    # Response parsing (shared by both passes)
+    # ------------------------------------------------------------------
+
+    def _parse_response(self, response_text: str, schema: Dict) -> Dict[str, Any]:
+        json_data = _extract_json(response_text)
+        return {
+            field_name: _coerce(
+                json_data.get(field_name) if json_data else None,
+                meta.get("type", "string"),
+            )
+            for field_name, meta in schema["fields"].items()
+        }
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+def _schema_to_prompt_parts(schema: Dict):
+    """Return (field_lines_str, skeleton_str) for prompt construction."""
+    lines = []
+    for name, meta in schema["fields"].items():
+        ftype = meta.get("type", "string")
+        desc = meta.get("description", name)
+        examples = meta.get("examples", [])
+        required = meta.get("required", False)
+        line = f'  "{name}": ({ftype}) {desc}'
+        if required:
+            line += " [REQUIRED]"
+        if examples:
+            line += f" — e.g. {', '.join(str(e) for e in examples)}"
+        lines.append(line)
+    skeleton = json.dumps({name: None for name in schema["fields"]}, indent=2)
+    return "\n".join(lines), skeleton
+
+
+def _extract_json(text: str) -> Optional[Dict]:
+    """Pull the first JSON object from an LLM response string."""
+    text = re.sub(r"```(?:json)?\s*|\s*```", "", text)
+    start, end = text.find("{"), text.rfind("}") + 1
+    if start == -1 or end <= start:
+        logger.warning("No JSON object found in LLM response")
         return None
-    
-    def _parse_value(self, value: str, field_type: str) -> Any:
-        """Parse and validate extracted value based on type."""
-        import re
-        from datetime import datetime
-        
-        if not value or value.lower() in ["none", "null", "n/a", ""]:
-            return None
-        
-        value = value.strip()
-        
-        if field_type == "date":
-            # Try multiple date formats
-            date_patterns = [
-                r'(\d{4}-\d{1,2}-\d{1,2})',  # YYYY-MM-DD
-                r'(\d{1,2}/\d{1,2}/\d{4})',  # MM/DD/YYYY
-                r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})',
-                r'(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
-            ]
-            
-            for pattern in date_patterns:
-                match = re.search(pattern, value, re.IGNORECASE)
-                if match:
-                    # For full matches, return as-is or normalize
-                    matched_date = match.group(0)
-                    logger.debug(f"Date pattern matched: {matched_date}")
-                    return matched_date
-            return None
-        
-        elif field_type == "number":
-            # Extract first number from text
-            match = re.search(r'(\d+(?:\.\d+)?)', value)
-            if match:
-                num_str = match.group(1)
-                return float(num_str) if '.' in num_str else int(num_str)
-            return None
-        
-        elif field_type == "boolean":
-            return value.lower() in ['true', 'yes', '1', 'agree', 'agreed']
-        
-        else:  # string
-            return value
-    
-    def _validate_field(self, field_name: str, value: Any, 
-                       field_meta: Dict) -> Any:
-        """Validate extracted field value."""
-        
-        # Check required fields
-        if field_meta.get("required", False) and value is None:
-            logger.warning(f"Required field '{field_name}' is missing")
-        
-        # Check value constraints
-        constraints = field_meta.get("constraints", {})
-        
-        if value is not None and constraints:
-            # Min/max for numbers
-            if "min" in constraints and isinstance(value, (int, float)):
-                if value < constraints["min"]:
-                    logger.warning(f"Field '{field_name}' below minimum: {value} < {constraints['min']}")
-            
-            if "max" in constraints and isinstance(value, (int, float)):
-                if value > constraints["max"]:
-                    logger.warning(f"Field '{field_name}' above maximum: {value} > {constraints['max']}")
-            
-            # Regex pattern for strings
-            if "pattern" in constraints and isinstance(value, str):
-                import re
-                if not re.match(constraints["pattern"], value):
-                    logger.warning(f"Field '{field_name}' doesn't match pattern: {constraints['pattern']}")
-            
-            # Enum values
-            if "enum" in constraints:
-                if value not in constraints["enum"]:
-                    logger.warning(f"Field '{field_name}' not in allowed values: {constraints['enum']}")
-        
-        return value
+    try:
+        return json.loads(text[start:end])
+    except json.JSONDecodeError as exc:
+        logger.warning(f"JSON parse error: {exc}")
+        return None
 
 
-def populate_form(clause_graph: Dict[str, str], schema: Dict) -> FormInstance:
-    """
-    Convenience function for form population.
-    
-    Args:
-        clause_graph: Hierarchical clause structure
-        schema: Field schema definition
-        
-    Returns:
-        Populated FormInstance
-    """
-    filler = FormFiller()
-    return filler.populate(clause_graph, schema)
+def _coerce(value: Any, expected_type: str) -> Any:
+    """Coerce a raw LLM value to the declared schema type. Returns None on failure."""
+    if value is None or str(value).strip().lower() in ("null", "none", "n/a", ""):
+        return None
+    try:
+        if expected_type == "date":
+            s = str(value).strip()
+            return s if re.search(r"\d{4}", s) else None
+        if expected_type == "number":
+            return float(value) if "." in str(value) else int(value)
+        if expected_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            return str(value).lower() in ("true", "yes", "1")
+        return str(value).strip() or None
+    except (ValueError, TypeError) as exc:
+        logger.debug(f"Coercion failed type={expected_type} value={value!r}: {exc}")
+        return None
+
+
+def _log_pass_result(extracted: Dict[str, Any], pass_name: str):
+    filled = sum(1 for v in extracted.values() if v is not None)
+    total = len(extracted)
+    logger.info(f"  → {pass_name}: {filled}/{total} fields filled")
+
+
+# ---------------------------------------------------------------------------
+# Convenience wrapper (keeps orchestrator call-site working)
+# ---------------------------------------------------------------------------
+
+def populate_form(clause_graph: Dict[str, str], schema: Dict,
+                  page_image=None) -> FormInstance:
+    """Thin wrapper kept for backwards compatibility."""
+    return FormFiller().populate(clause_graph, schema, page_image=page_image)
