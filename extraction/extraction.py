@@ -23,13 +23,21 @@ class LLMExtractor:
         
         logger.info(f"Loading LLM: {self.model_name}")
         
-        self.llm = pipeline(
-            "text-generation",
-            model=self.model_name,
-            temperature=self.temperature,
-            max_new_tokens=self.max_tokens,
-            device_map=config.model.device
-        )
+        # Check if using Ollama
+        if self.model_name.startswith("ollama/"):
+            self.use_ollama = True
+            self.ollama_model = self.model_name.replace("ollama/", "")
+            logger.info(f"Using Ollama with model: {self.ollama_model}")
+            self.llm = None
+        else:
+            self.use_ollama = False
+            self.llm = pipeline(
+                "text-generation",
+                model=self.model_name,
+                temperature=self.temperature,
+                max_new_tokens=self.max_tokens,
+                device_map=config.model.device
+            )
     
     def extract_field(self, field_name: str, field_type: str, 
                      context_text: str, examples: Optional[list] = None) -> Any:
@@ -54,8 +62,21 @@ class LLMExtractor:
         
         # Generate response
         try:
-            outputs = self.llm(prompt)
-            response_text = outputs[0]["generated_text"]
+            if self.use_ollama:
+                import ollama
+                response = ollama.generate(
+                    model=self.ollama_model,
+                    prompt=prompt,
+                    stream=False,
+                    options={
+                        "temperature": self.temperature,
+                        "num_predict": self.max_tokens,
+                    }
+                )
+                response_text = response["response"]
+            else:
+                outputs = self.llm(prompt)
+                response_text = outputs[0]["generated_text"]
             
             # Extract JSON from response
             extracted_value = self._parse_response(response_text, field_name, field_type)
@@ -88,8 +109,31 @@ class LLMExtractor:
         if examples:
             example_text = "\n\nExamples of valid values:\n" + "\n".join(f"- {ex}" for ex in examples)
         
-        # TinyLlama-specific format
-        prompt = f"""<|system|>
+        # Llama 3.2 format (works with both Ollama and HF)
+        if self.use_ollama or "llama" in self.model_name.lower():
+            prompt = f"""<|start_header_id|>system<|end_header_id|>
+
+You are a precise data extraction API. Output ONLY valid JSON.
+{instruction}
+If the value is not found in the text, return null.
+{example_text}
+
+<|start_header_id|>user<|end_header_id|>
+
+Extract the value for "{field_name}" from this text:
+
+TEXT:
+\"\"\"{context_text[:1000]}\"\"\"
+
+Output format (JSON only):
+{{ "{field_name}": "<extracted_value>" }}
+
+<|start_header_id|>assistant<|end_header_id|>
+
+"""
+        else:
+            # Fallback format for other models
+            prompt = f"""<|system|>
 You are a precise data extraction API. Output ONLY valid JSON.
 {instruction}
 If the value is not found in the text, return null.
@@ -112,7 +156,9 @@ Output format (JSON only):
                        field_type: str) -> Any:
         """Parse and validate extracted value from LLM response."""
         
-        # Remove prompt from response
+        # Remove prompt/headers from response (for both formats)
+        if "<|start_header_id|>" in response_text:
+            response_text = response_text.split("<|start_header_id|>")[-1]
         if "<|assistant|>" in response_text:
             response_text = response_text.split("<|assistant|>")[-1]
         

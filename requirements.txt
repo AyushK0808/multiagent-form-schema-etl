@@ -22,3 +22,5 @@ black
 flake8
 google-genai
 ollama
+datasets
+reportlab
