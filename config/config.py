@@ -18,8 +18,6 @@ except ImportError:
 @dataclass
 class ModelConfig:
     """Configuration for ML models."""
-    gemini_model: str = "gemini-2.0-flash"  # Use flash for speed and cost-efficiency
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     layout_model: str = "models/layoutlmv3-nda/checkpoint_best"
     llm_model: str = "ollama/llama3.2"
     llm_temperature: float = 0.1

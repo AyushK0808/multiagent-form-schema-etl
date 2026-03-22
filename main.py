@@ -2,13 +2,12 @@
 Simplified main entrypoint: run the full pipeline on a single NDA PDF
 
 Behavior:
-- Looks for `data/raw/NDA.pdf`; if not found, falls back to
-  `data/raw/sample_contract_form.pdf` if available.
-- Runs the existing pipeline and writes:
-  - Intermediate phase outputs to data/intermediate/
-  - Final extraction to configured output dir
-- Supports --use-gemini flag for direct Gemini vision extraction
-- Supports --use-llama flag for direct Llama 3.2 vision extraction
+ - Looks for `data/raw/NDA.pdf`; if not found, falls back to
+     `data/raw/sample_contract_form.pdf` if available.
+ - Runs the existing pipeline and writes:
+     - Intermediate phase outputs to data/intermediate/
+     - Final extraction to configured output dir
+ - Supports --use-llama flag for direct Llama 3.2 vision extraction
 """
 import json
 import logging
@@ -20,7 +19,6 @@ from config.config import get_config, update_config
 from ingestion.ingestion import ingest_pdf
 from orchestration.orchestrator import get_orchestrator
 from schema.schema import load_schema
-# from extraction.gemini_extractor import GeminiDirectExtractor
 # from extraction.llama_extractor import LlamaDirectExtractor
 
 from PIL import Image
@@ -42,13 +40,11 @@ def setup_directories():
 
 
 def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name: str = "NDA_Form", 
-                     use_gemini: bool = False, use_llama: bool = False) -> dict:
+                     use_llama: bool = False) -> dict:
     logger.info(f"Processing: {pdf_path}")
     
     method = "Full Pipeline"
-    # if use_gemini:
-    #     method = "Gemini Vision"
-    # elif use_llama:
+    # if use_llama:
     #     method = "Llama 3.2 Vision (Ollama)"
     
     logger.info(f"Using extraction method: {method}")
@@ -70,42 +66,7 @@ def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name:
         logger.error(f"Schema '{form_name}' not found")
         return {}
     
-    # Use Gemini direct extraction if requested
-    # if use_gemini:
-    #     try:
-    #         logger.info("Starting Gemini direct extraction...")
-    #         extractor = GeminiDirectExtractor()
-    #         extracted_fields = extractor.extract(page_image, schema)
-            
-    #         # Format output
-    #         output_data = {
-    #             "form": form_name,
-    #             "fields": extracted_fields,
-    #             "extraction_method": "gemini_vision",
-    #             "is_complete": all(v is not None for v in extracted_fields.values()),
-    #             "pipeline_metadata": {
-    #                 "extraction_timestamp": __import__("datetime").datetime.now().isoformat(),
-    #                 "num_fields": len(extracted_fields),
-    #                 "num_fields_extracted": sum(1 for v in extracted_fields.values() if v is not None)
-    #             }
-    #         }
-            
-    #         if output_path is None:
-    #             cfg = get_config()
-    #             output_path = cfg.paths.output_dir / f"extracted_gemini_{pdf_path.stem}.json"
-            
-    #         output_path.parent.mkdir(parents=True, exist_ok=True)
-    #         with open(output_path, "w", encoding="utf-8") as f:
-    #             json.dump(output_data, f, indent=2)
-            
-    #         logger.info(f"Saved Gemini extraction to: {output_path}")
-    #         return output_data
-            
-    #     except Exception as e:
-    #         logger.error(f"Gemini extraction failed: {e}")
-    #         import traceback
-    #         logger.debug(traceback.format_exc())
-    #         sys.exit(1)
+    # (Direct vision extractors such as Llama can be enabled via flags.)
     
     # # Use Llama direct extraction if requested
     # if use_llama:
@@ -223,8 +184,7 @@ def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name:
 
 def main():
     # Parse arguments
-    parser = argparse.ArgumentParser(description="NDA Extraction - Pipeline or Gemini Vision")
-    parser.add_argument("--use-gemini", action="store_true", help="Use Gemini vision for direct extraction")
+    parser = argparse.ArgumentParser(description="NDA Extraction - Pipeline or vision-based extraction")
     parser.add_argument("--form", default="NDA_Form", help="Form schema name (default: NDA_Form)")
     parser.add_argument(
         '--use-llama',
@@ -250,7 +210,7 @@ def main():
         sys.exit(1)
 
     try:
-        result = extract_contract(pdf_to_process, use_gemini=args.use_gemini, use_llama=args.use_llama, form_name=args.form)
+        result = extract_contract(pdf_to_process, use_llama=args.use_llama, form_name=args.form)
         print(json.dumps(result.get("fields", {}), indent=2))
     except Exception as e:
         logger.exception("Extraction failed")
@@ -427,21 +387,7 @@ def evaluate_system(test_dir: str):
 
 def main():
     """Main entry point with CLI."""
-    parser = argparse.ArgumentParser(
-        description="NDA Extraction - Pipeline, Gemini Vision, or Llama 3.2 Vision"
-    )
-    
-    # parser.add_argument(
-    #     '--use-gemini',
-    #     action='store_true',
-    #     help='Use Gemini vision for direct extraction'
-    # )
-    
-    # parser.add_argument(
-    #     '--use-llama',
-    #     action='store_true',
-    #     help='Use Llama 3.2 vision for direct extraction (requires local Ollama)'
-    # )
+    parser = argparse.ArgumentParser(description="NDA Extraction - Pipeline or vision-based extraction")
     
     parser.add_argument(
         '--form',
@@ -469,12 +415,7 @@ def main():
         sys.exit(1)
 
     try:
-        result = extract_contract(
-            pdf_to_process,
-            # use_gemini=args.use_gemini,
-            # use_llama=args.use_llama,
-            form_name=args.form
-        )
+        result = extract_contract(pdf_to_process, form_name=args.form)
         print(json.dumps(result.get("fields", {}), indent=2))
     except Exception as e:
         logger.exception("Extraction failed")

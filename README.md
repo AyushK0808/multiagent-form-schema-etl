@@ -47,7 +47,7 @@ This project implements an end-to-end pipeline for extracting structured informa
 ### Multi-Modal Processing
 - **Text Extraction**: Native PDF text with fallback to Tesseract OCR
 - **Layout Awareness**: Spatial features via LayoutLMv3 token classification
-- **Vision Capabilities**: Optional Gemini and Llama 3.2 vision models for image-based extraction
+- **Vision Capabilities**: Optional Llama 3.2 vision model for image-based extraction
 
 ### Schema Management
 - **Flexible Field Definitions**: Support for multiple data types (date, string, number, boolean)
@@ -58,7 +58,7 @@ This project implements an end-to-end pipeline for extracting structured informa
 ### Intelligent Extraction
 - **Clause Graph**: Deterministic document structure representation preserving hierarchy
 - **Schema-Guided LLM**: Micro-decoding approach extracts fields within relevant contexts only
-- **Multiple LLM Support**: Works with Ollama (local), Hugging Face, and Google Gemini
+- **Multiple LLM Support**: Works with Ollama (local) and Hugging Face
 - **Recovery Mechanisms**: Automatic fallback strategies for failed extractions
 
 ### Orchestration
@@ -231,7 +231,7 @@ Performs field-level extraction using LLMs.
 **Key Classes**:
 - `LLMExtractor`: Handles LLM-based field extraction with structured output
 - `FormFiller`: Populates form instances using clause graphs and schemas
-- `GeminiDirectExtractor`: Direct extraction using Google Gemini vision
+- `VisionDirectExtractor`: Direct extraction using a vision-capable LLM
 - `LlamaDirectExtractor`: Direct extraction using Llama 3.2 vision (Ollama)
 
 **Extraction Strategies**:
@@ -288,8 +288,8 @@ python -m spacy download en_core_web_sm
 ### Step 5: Configure Models
 Edit `.env` file (create if not exists):
 ```env
-# Gemini API (optional, for vision extraction)
-GEMINI_API_KEY=your-api-key-here
+# Vision model API keys (optional)
+# e.g. PROVIDER_API_KEY=your-api-key-here
 ```
 
 ### Step 6: Prepare Data
@@ -310,7 +310,7 @@ python -c "from ingestion.ingestion import ingest_pdf; print('Installation succe
 Configuration is managed through `config/config.py` using dataclasses.
 
 ### Model Configuration (`ModelConfig`)
-- `gemini_model`: Gemini model name (default: "gemini-2.0-flash")
+- (Removed Gemini-specific model configuration)
 - `layout_model`: Path to LayoutLMv3 checkpoint or "fallback"
 - `llm_model`: LLM model spec: "ollama/model", "hf-model", etc. (default: "ollama/llama3.2")
 - `llm_temperature`: Sampling temperature (default: 0.1)
@@ -334,10 +334,7 @@ update_config(enable_validation=False, verbose=True)
 # Process a single PDF
 python main.py --input data/raw/sample_contract.pdf
 
-# Use Gemini vision (requires API key)
-python main.py --input data/raw/contract.pdf --use-gemini
-
-# Use Llama 3.2 vision (requires Ollama)
+# Use vision-based extractors (provider-dependent)
 python main.py --input data/raw/contract.pdf --use-llama --form-name NDA_Form
 ```
 
@@ -397,7 +394,7 @@ multiagent-form-schema-etl/
 | Provider | Model | Config | Status |
 |----------|-------|--------|--------|
 | **Ollama (Local)** | `ollama/llama3.2` | Local, private | ✅ Recommended |
-| **Google Gemini** | `gemini-2.0-flash` | Cloud, reliable | ✅ Works well |
+| **Hosted Vision API** | `provider-model` | Cloud/hosted, reliable | provider-dependent |
 
 ---
 
@@ -447,7 +444,7 @@ python finetune/train.py --generate --n_samples 300 --epochs 5
 ### Throughput
 - **Local (CPU)**: 3-5 documents/minute
 - **Local (GPU)**: 10-20 documents/minute
-- **Batch with Gemini**: 20-30 documents/minute
+- **Batch with vision API**: 20-30 documents/minute (provider-dependent)
 
 ---
 
