@@ -159,7 +159,8 @@ class LlamaVisionExtractor:
     def _call_ollama(self, prompt: str, img_b64: str,
                      num_gpu: int = -1) -> str:
         import ollama
-        options: Dict[str, Any] = {"temperature": 0.1, "num_predict": 1024}
+        # Minimize hallucinations: low temp + constrained token budget
+        options: Dict[str, Any] = {"temperature": 0.0, "num_predict": 256}
         if num_gpu == 0:
             options["num_gpu"] = 0      # force CPU-only inference
         response = ollama.generate(

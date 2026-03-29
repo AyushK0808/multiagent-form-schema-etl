@@ -1,27 +1,12 @@
 """
 Fine-tune LayoutLMv3 for token classification on NDA/contract layout detection.
 
-Usage:
-    # 1. Generate synthetic dataset first (or supply your own):
-    python -m data.dataset_generator --n 300 --out data/layoutlm_dataset
-
-    # 2. Run fine-tuning:
-    python train.py
-
-    # With custom options:
-    python train.py \
-        --dataset_dir data/layoutlm_dataset \
-        --output_dir models/layoutlmv3-nda \
-        --epochs 5 \
-        --batch_size 2 \
-        --lr 5e-5 \
-        --resume_from_checkpoint
+Runs with hardcoded config. Automatically resumes from checkpoint_last if it exists.
 
 Label set:
     0=paragraph  1=heading  2=list_item  3=table  4=caption  5=other
 """
 
-import argparse
 import json
 import logging
 import os
@@ -30,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-
+from tqdm import trange
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -183,10 +168,23 @@ def compute_metrics(predictions_and_labels, id2label=ID2LABEL):
 
 
 # ---------------------------------------------------------------------------
+# Training configuration (hardcoded)
+# ---------------------------------------------------------------------------
+
+BASE_MODEL = "microsoft/layoutlmv3-base"
+DATASET_DIR = "data/layoutlm_dataset"
+OUTPUT_DIR = "models/layoutlmv3-nda"
+EPOCHS = 50
+BATCH_SIZE = 8
+LEARNING_RATE = 5e-5
+MAX_LENGTH = 384
+DEVICE = "auto"  # "auto", "cpu", "cuda", "mps"
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
-def train(args):
+def train():
     from transformers import (
         LayoutLMv3Processor,
         LayoutLMv3ForTokenClassification,
@@ -194,31 +192,31 @@ def train(args):
     )
 
     # ---- Device ----
-    if args.device == "auto":
+    if DEVICE == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device(args.device)
+        device = torch.device(DEVICE)
     logger.info(f"Using device: {device}")
 
     # ---- Processor ----
-    logger.info(f"Loading processor: {args.base_model}")
+    logger.info(f"Loading processor: {BASE_MODEL}")
     processor = LayoutLMv3Processor.from_pretrained(
-        args.base_model,
+        BASE_MODEL,
         apply_ocr=False,
     )
 
     # ---- Dataset ----
-    tokenised = prepare_datasets(args.dataset_dir, processor, max_length=args.max_length)
+    tokenised = prepare_datasets(DATASET_DIR, processor, max_length=MAX_LENGTH)
 
     train_loader = DataLoader(
         tokenised["train"],
-        batch_size=args.batch_size,
+        batch_size=BATCH_SIZE,
         shuffle=True,
         num_workers=0,
     )
     val_loader = DataLoader(
         tokenised["validation"],
-        batch_size=args.batch_size,
+        batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=0,
     )
@@ -226,7 +224,7 @@ def train(args):
     # ---- Model ----
     logger.info("Initialising LayoutLMv3ForTokenClassification")
     model = LayoutLMv3ForTokenClassification.from_pretrained(
-        args.base_model,
+        BASE_MODEL,
         num_labels=NUM_LABELS,
         id2label=ID2LABEL,
         label2id=LABEL2ID,
@@ -237,41 +235,51 @@ def train(args):
     # ---- Optimizer + Scheduler ----
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
+        lr=LEARNING_RATE,
         weight_decay=0.01,
     )
-    total_steps   = len(train_loader) * args.epochs
+    total_steps   = len(train_loader) * EPOCHS
     warmup_steps  = max(1, total_steps // 10)
     scheduler     = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
     )
 
     # ---- Output dir ----
-    output_dir = Path(args.output_dir)
+    output_dir = Path(OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     best_f1    = 0.0
     best_epoch = 0
 
-    # ---- Resume ----
+    # ---- Resume (automatic) ----
     start_epoch = 0
     checkpoint_path = output_dir / "checkpoint_last"
-    if args.resume and checkpoint_path.exists():
-        logger.info(f"Resuming from {checkpoint_path}")
-        model = LayoutLMv3ForTokenClassification.from_pretrained(str(checkpoint_path))
-        model.to(device)
+    if checkpoint_path.exists():
         start_epoch_file = checkpoint_path / "epoch.txt"
         if start_epoch_file.exists():
-            start_epoch = int(start_epoch_file.read_text().strip()) + 1
+            completed_epoch = int(start_epoch_file.read_text().strip())
+            start_epoch = completed_epoch + 1
+            if start_epoch >= EPOCHS:
+                logger.info(f"Training already complete (last epoch: {completed_epoch}). Restarting from epoch 0.")
+                start_epoch = 0
+            else:
+                logger.info(f"Resuming from {checkpoint_path} (last epoch: {completed_epoch})")
+                model = LayoutLMv3ForTokenClassification.from_pretrained(str(checkpoint_path))
+                model.to(device)
+        else:
+            logger.info(f"Resuming from {checkpoint_path} (epoch info not found)")
+            model = LayoutLMv3ForTokenClassification.from_pretrained(str(checkpoint_path))
+            model.to(device)
+            start_epoch = 0
 
     logger.info(
-        f"Training: epochs={args.epochs}  batch={args.batch_size}  "
-        f"lr={args.lr}  warmup={warmup_steps}  total_steps={total_steps}"
+        f"Training: epochs={EPOCHS}  batch={BATCH_SIZE}  "
+        f"lr={LEARNING_RATE}  warmup={warmup_steps}  total_steps={total_steps}  start_epoch={start_epoch}"
     )
 
     history = []
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in trange(start_epoch, EPOCHS, desc="Epochs"):
         # ---- Train epoch ----
         model.train()
         epoch_loss = 0.0
@@ -319,7 +327,7 @@ def train(args):
         metrics = compute_metrics((preds_concat, labels_concat))
 
         logger.info(
-            f"Epoch {epoch+1}/{args.epochs}  "
+            f"Epoch {epoch+1}/{EPOCHS}  "
             f"train_loss={avg_train_loss:.4f}  "
             f"val_loss={avg_val_loss:.4f}  "
             f"accuracy={metrics['accuracy']:.4f}  "
@@ -337,9 +345,9 @@ def train(args):
         history.append(row)
 
         # ---- Save last checkpoint ----
-        model.save_pretrained(str(checkpoint_path))
-        processor.save_pretrained(str(checkpoint_path))
-        (checkpoint_path / "epoch.txt").write_text(str(epoch))
+        # model.save_pretrained(str(checkpoint_path))
+        # processor.save_pretrained(str(checkpoint_path))
+        # (checkpoint_path / "epoch.txt").write_text(str(epoch))
 
         # ---- Save best checkpoint ----
         if metrics["macro_f1"] >= best_f1:
@@ -363,39 +371,5 @@ def train(args):
     return history
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Fine-tune LayoutLMv3 for NDA layout classification")
-    p.add_argument("--base_model",   default="microsoft/layoutlmv3-base",
-                   help="HuggingFace model ID or local path")
-    p.add_argument("--dataset_dir",  default="data/layoutlm_dataset",
-                   help="Path to datasets.DatasetDict saved by dataset_generator.py")
-    p.add_argument("--output_dir",   default="models/layoutlmv3-nda",
-                   help="Where to save checkpoints")
-    p.add_argument("--epochs",       type=int,   default=5)
-    p.add_argument("--batch_size",   type=int,   default=2,
-                   help="Keep low (2-4) if running on CPU or a small GPU")
-    p.add_argument("--lr",           type=float, default=5e-5)
-    p.add_argument("--max_length",   type=int,   default=512)
-    p.add_argument("--device",       default="auto", choices=["auto","cpu","cuda","mps"])
-    p.add_argument("--resume",       action="store_true",
-                   help="Resume from checkpoint_last if it exists")
-    p.add_argument("--generate",     action="store_true",
-                   help="Generate synthetic dataset before training")
-    p.add_argument("--n_samples",    type=int,   default=200,
-                   help="Number of samples for --generate")
-    return p.parse_args()
-
-
 if __name__ == "__main__":
-    args = parse_args()
-
-    if args.generate:
-        logger.info("Generating synthetic dataset...")
-        from data.dataset_generator import build_hf_dataset
-        build_hf_dataset(n_samples=args.n_samples, output_dir=args.dataset_dir)
-
-    train(args)
+    train()

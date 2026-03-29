@@ -324,7 +324,7 @@ def _is_finetuned_checkpoint(path: str) -> bool:
     """
     Return True only if `path` is a directory containing a fine-tuned
     LayoutLMv3 classifier (i.e. it has a config.json AND pytorch_model.bin
-    or model.safetensors, and the config mentions num_labels > 1).
+    or model.safetensors, and the config mentions our expected labels).
     """
     p = Path(path)
     if not p.is_dir():
@@ -333,11 +333,19 @@ def _is_finetuned_checkpoint(path: str) -> bool:
     has_weights = (p / "pytorch_model.bin").exists() or any(p.glob("*.safetensors"))
     if not (has_config and has_weights):
         return False
-    # Check that the config actually has num_labels set to our label count
+    # Check that the config actually has our labels set
     try:
         import json
         cfg = json.loads((p / "config.json").read_text())
-        return cfg.get("num_labels", 0) == len(LABEL2ID)
+        # Support both old num_labels format and newer id2label/label2id format
+        if "num_labels" in cfg:
+            return cfg.get("num_labels", 0) == len(LABEL2ID)
+        elif "id2label" in cfg:
+            config_labels = set(cfg["id2label"].values())
+            expected_labels = set(LABEL2ID.keys())
+            return config_labels == expected_labels
+        else:
+            return False
     except Exception:
         return False
 

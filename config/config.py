@@ -24,13 +24,12 @@ class ModelConfig:
     llm_max_tokens: int = 256
     device: str = "auto"  # "auto", "cpu", "cuda"
     # Ordered preference for local vision models (used by Ollama extractor).
-    # Add provider/model names here in preferred order, e.g. 'moonshot' before 'llama3.2-vision'.
+    # Stronger models first to reduce hallucinations (moondream is weakest).
     vision_model_preference: List[str] = field(default_factory=lambda: [
-        "moonshot",
         "moondream",
-        "minicpm-v",
-        "llava:7b",
         "llama3.2-vision",
+        "llava:7b",
+        "minicpm-v",
     ])
     
 @dataclass
