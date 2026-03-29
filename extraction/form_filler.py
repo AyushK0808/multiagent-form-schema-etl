@@ -3,7 +3,7 @@ Form population pipeline:
 
   1. Text LLM  -- send full document text + schema, get JSON back.
   2. Vision LLM fallback -- for any field still None after step 1,
-     re-run extraction using a local vision model (Ollama) against
+     re-run extraction using a Groq-hosted vision model against
      the page image.
   3. Final sentinel -- any field still None after both passes is set
      to the string "NaN" so callers always receive a complete record.
@@ -25,10 +25,10 @@ class FormFiller:
     """
     Populates a form using:
       - Pass 1: text LLM (fast, works on native-text PDFs)
-      - Pass 2: vision LLM via Ollama (fallback for fields that came back null)
+      - Pass 2: vision LLM via Groq (fallback for fields that came back null)
     """
 
-    def __init__(self, vision_model: str = "llama3.2-vision"):
+    def __init__(self, vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"):
         self.config = get_config()
         model_cfg = self.config.model
 

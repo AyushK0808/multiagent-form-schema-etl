@@ -60,6 +60,7 @@ class ContractState(TypedDict, total=False):
     schema_id:         str
     field_mapping:     dict
     normalised_fields: dict
+    repaired_fields:   dict
 
     # -- DB
     record_id: str
@@ -95,6 +96,7 @@ class ContractOrchestrator:
         g.add_node("layout",           self._layout_node)
         g.add_node("parallel_extract", self._parallel_extract_node)
         g.add_node("policy_fuse",      self._policy_fuse_node)
+        g.add_node("repair",           self._repair_node)
         g.add_node("schema_resolve",   self._schema_resolve_node)
         g.add_node("validate",         self._validation_node)
         g.add_node("db_populate",      self._db_populate_node)
@@ -103,7 +105,8 @@ class ContractOrchestrator:
         g.set_entry_point("layout")
         g.add_edge("layout",           "parallel_extract")
         g.add_edge("parallel_extract", "policy_fuse")
-        g.add_edge("policy_fuse",      "schema_resolve")
+        g.add_edge("policy_fuse",      "repair")
+        g.add_edge("repair",           "schema_resolve")
         g.add_edge("schema_resolve",   "validate")
         g.add_edge("validate",         "db_populate")
         g.add_edge("db_populate",      "finalize")
@@ -218,13 +221,48 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 4 -- Schema resolution (Groq agent)
+    # Node 4 -- Groq repair pass
+    # ------------------------------------------------------------------
+
+    def _repair_node(self, state: ContractState) -> ContractState:
+        logger.info("--- Node: repair ---")
+        pr = state.get("policy_result")
+        fields = pr.fields if pr else {}
+        schema = state.get("schema", {})
+
+        if not self.config.enable_schema_agent or not fields or not schema:
+            state["repaired_fields"] = fields
+            return state
+
+        try:
+            from schema.schema_agent import SchemaAgent
+
+            agent = SchemaAgent(
+                small_model=self.config.groq.small_model,
+                synthesis_model=self.config.groq.synthesis_model,
+            )
+            repaired = agent.repair_fields(
+                fields=fields,
+                schema=schema,
+                document_hint=schema.get("form_name", ""),
+            )
+            state["repaired_fields"] = repaired
+            logger.info("[Repair] Repaired %d field(s)", len(repaired))
+        except Exception as exc:
+            logger.error("[Repair] Failed: %s", exc)
+            state.setdefault("warnings", []).append(f"Repair: {exc}")
+            state["repaired_fields"] = fields
+
+        return state
+
+    # ------------------------------------------------------------------
+    # Node 5 -- Schema resolution (Groq agent)
     # ------------------------------------------------------------------
 
     def _schema_resolve_node(self, state: ContractState) -> ContractState:
         logger.info("--- Node: schema_resolve ---")
         pr     = state.get("policy_result")
-        fields = pr.fields if pr else {}
+        fields = state.get("repaired_fields") or (pr.fields if pr else {})
 
         if not self.config.enable_schema_agent:
             logger.info("[SchemaResolve] Agent disabled -- using input schema as-is")
@@ -241,7 +279,10 @@ class ContractOrchestrator:
                 registry_dir=self.config.paths.registry_dir,
                 sim_threshold=self.config.processing.schema_sim_threshold,
             )
-            agent = SchemaAgent(model=self.config.groq.model)
+            agent = SchemaAgent(
+                small_model=self.config.groq.small_model,
+                synthesis_model=self.config.groq.synthesis_model,
+            )
 
             doc_hint    = state.get("schema", {}).get("form_name", "")
             norm_fields = agent.normalise_fields(fields, document_hint=doc_hint)
@@ -289,7 +330,7 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 5 -- Validation + recovery
+    # Node 6 -- Validation + recovery
     # ------------------------------------------------------------------
 
     def _validation_node(self, state: ContractState) -> ContractState:
@@ -323,7 +364,7 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 6 -- Database population
+    # Node 7 -- Database population
     # ------------------------------------------------------------------
 
     def _db_populate_node(self, state: ContractState) -> ContractState:
@@ -363,7 +404,7 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 7 -- Finalize output
+    # Node 8 -- Finalize output
     # ------------------------------------------------------------------
 
     def _finalize_node(self, state: ContractState) -> ContractState:

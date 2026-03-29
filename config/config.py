@@ -27,8 +27,8 @@ class ModelConfig:
     schema_recognition_layout_model: str = "models/schema_recognition/layoutlmv3"
     schema_recognition_layout_fallback_model: str = "microsoft/layoutlmv3-base"
 
-    # Text LLM backend  ("ollama/<model>" or a HuggingFace model ID)
-    llm_model:       str   = "ollama/llama3.2"
+    # Text LLM backend  (Hugging Face model ID or other text-generation backend)
+    llm_model:       str   = "google/flan-t5-base"
     llm_temperature: float = 0.1
     llm_max_tokens:  int   = 256
 
@@ -40,10 +40,9 @@ class ModelConfig:
     # Device for local models
     device: str = "auto"   # "auto" | "cpu" | "cuda"
 
-    # Ordered preference for local vision models used by Ollama extractor.
+    # Legacy local vision preference list retained for backward compatibility.
     vision_model_preference: List[str] = field(default_factory=lambda: [
         "moondream",
-        "llama3.2-vision",
         "llava:7b",
         "minicpm-v",
     ])
@@ -53,9 +52,9 @@ class ModelConfig:
 class GroqConfig:
     """Configuration for the Groq-hosted LLM (schema-resolution agent)."""
     api_key:  str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
-    model:    str = "llama-3.3-70b-versatile"
-    # Fallback model for lower quota / rate-limit situations
-    fallback_model: str = "llama-3.1-8b-instant"
+    small_model: str = "llama-3.1-8b-instant"
+    synthesis_model: str = "llama-3.3-70b-versatile"
+    vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     temperature: float = 0.0
     max_tokens:  int   = 1024
 

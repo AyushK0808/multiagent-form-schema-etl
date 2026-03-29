@@ -29,7 +29,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+_DEFAULT_SMALL_MODEL = "llama-3.1-8b-instant"
+_DEFAULT_SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
 _MAX_RETRIES        = 2
 
 
@@ -92,11 +93,17 @@ class SchemaAgent:
 
     Parameters
     ----------
-    model : Groq model ID (default llama-3.3-70b-versatile)
+    small_model : Groq model ID for normalization and mapping
+    synthesis_model : Groq model ID for schema synthesis
     """
 
-    def __init__(self, model: str = _DEFAULT_GROQ_MODEL):
-        self.model  = model
+    def __init__(
+        self,
+        small_model: str = _DEFAULT_SMALL_MODEL,
+        synthesis_model: str = _DEFAULT_SYNTHESIS_MODEL,
+    ):
+        self.small_model = small_model
+        self.synthesis_model = synthesis_model
         self.client = _groq_client()
 
     # ------------------------------------------------------------------
@@ -137,7 +144,7 @@ class SchemaAgent:
             f"Fields to normalise:\n{json.dumps(raw_fields, indent=2)}"
         )
 
-        result = self._call_with_retry(system, user, "normalise_fields")
+        result = self._call_with_retry(system, user, "normalise_fields", model=self.small_model)
         if result is None:
             logger.warning("[SchemaAgent] Normalisation failed — returning raw fields")
             return raw_fields
@@ -186,7 +193,7 @@ class SchemaAgent:
             f"{json.dumps(target_field_info, indent=2)}"
         )
 
-        result = self._call_with_retry(system, user, "map_fields")
+        result = self._call_with_retry(system, user, "map_fields", model=self.small_model)
         if result is None:
             logger.warning("[SchemaAgent] Mapping failed — returning empty mapping")
             empty_vals = {k: None for k in target_schema.get("fields", {})}
@@ -251,13 +258,62 @@ class SchemaAgent:
             f"{json.dumps(sample_info, indent=2)}"
         )
 
-        result = self._call_with_retry(system, user, "synthesise_schema", max_tokens=1500)
+        result = self._call_with_retry(
+            system,
+            user,
+            "synthesise_schema",
+            model=self.synthesis_model,
+            max_tokens=1500,
+        )
         if result is None or "fields" not in result:
             logger.warning("[SchemaAgent] Synthesis failed — building fallback schema")
             return self._fallback_schema(observed_fields, document_hint)
 
         logger.info(f"[SchemaAgent] Synthesised schema: {result.get('form_name', '?')}")
         return result
+
+    def repair_fields(
+        self,
+        fields: Dict[str, Any],
+        schema: Dict,
+        document_hint: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Repair low-quality or partially-invalid fields after policy fusion.
+        Keeps the same keys and must not invent unsupported values.
+        """
+        field_info = {
+            name: {
+                "type": meta.get("type", "string"),
+                "description": meta.get("description", name),
+                "required": meta.get("required", False),
+            }
+            for name, meta in schema.get("fields", {}).items()
+        }
+        system = (
+            "You are a document-extraction repair engine. "
+            "Given candidate field values and the target schema, clean and repair values. "
+            "Rules:\n"
+            "- Output ONLY a valid JSON object with the same keys.\n"
+            "- Do not invent values not supported by the candidate fields.\n"
+            "- Keep unknown values as null.\n"
+            "- Dates -> ISO 8601 when possible.\n"
+            "- Numbers -> numeric values only.\n"
+            "- Preserve semantically correct extracted values."
+        )
+        user = (
+            f"Document type: {document_hint or schema.get('form_name', 'unknown')}\n\n"
+            f"Schema:\n{json.dumps(field_info, indent=2)}\n\n"
+            f"Candidate fields:\n{json.dumps(fields, indent=2)}"
+        )
+        result = self._call_with_retry(system, user, "repair_fields", model=self.small_model)
+        if result is None:
+            logger.warning("[SchemaAgent] Repair failed — returning original fields")
+            return fields
+
+        merged = dict(fields)
+        merged.update(result)
+        return merged
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -268,12 +324,13 @@ class SchemaAgent:
         system: str,
         user: str,
         op_name: str,
+        model: str,
         max_tokens: int = 1024,
     ) -> Optional[Dict]:
         for attempt in range(_MAX_RETRIES):
             try:
                 raw = _call_groq(
-                    self.client, self.model, system, user, max_tokens=max_tokens
+                    self.client, model, system, user, max_tokens=max_tokens
                 )
                 parsed = _extract_json(raw)
                 if parsed is not None:
