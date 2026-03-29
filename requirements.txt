@@ -1,26 +1,63 @@
+# ── Core ML ──────────────────────────────────────────────────────────────────
 torch
 transformers
 accelerate
+datasets
+sentencepiece          # required by some tokenizers (Donut, T5)
+timm                   # Donut vision encoder dependency
+
+huggingface_hub[cli]
+# ── OCR-free extraction (Donut) ───────────────────────────────────────────────
+# Model: naver-clova-ix/donut-base-finetuned-docvqa
+# Pull weights once: huggingface-cli download naver-clova-ix/donut-base-finetuned-docvqa
+
+# ── Layout model ─────────────────────────────────────────────────────────────
+# LayoutLMv3 tokenizer / processor are part of transformers
+
+# ── Local LLM (text + vision) ────────────────────────────────────────────────
+ollama
+
+# ── Groq (schema-resolution agent) ───────────────────────────────────────────
+groq
+
+# ── Semantic embeddings (schema registry) ─────────────────────────────────────
+sentence-transformers
+numpy
+
+# ── Document ingestion ────────────────────────────────────────────────────────
 PyMuPDF
 pytesseract
 Pillow
-spacy
-python-dateutil
-python-dotenv
+
+# ── Pipeline orchestration ────────────────────────────────────────────────────
 langgraph
 langchain
-numpy
+
+# ── Data processing ──────────────────────────────────────────────────────────
 pandas
-tqdm
+scikit-learn
+
+# ── Validation / utilities ───────────────────────────────────────────────────
+python-dateutil
+python-dotenv
 jsonschema
 pydantic
-scikit-learn
+
+# ── Database ─────────────────────────────────────────────────────────────────
+# SQLite is part of the Python standard library — no extra package needed.
+# Uncomment below for PostgreSQL support:
+# psycopg2-binary
+
+# ── NLP ──────────────────────────────────────────────────────────────────────
+spacy
+
+# ── Training / evaluation ────────────────────────────────────────────────────
+tqdm
 matplotlib
 seaborn
 pytest
 black
 flake8
-google-genai
-ollama
-datasets
+
+# ── Report generation ─────────────────────────────────────────────────────────
 reportlab

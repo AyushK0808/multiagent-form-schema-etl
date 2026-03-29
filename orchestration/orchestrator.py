@@ -1,191 +1,403 @@
 """
-Orchestration pipeline using LangGraph with validation and logging.
+Agentic ETL Orchestrator
+========================
+LangGraph pipeline with six sequential nodes:
 
-Key change: the extraction node now passes page_image to FormFiller so the
-vision-LLM fallback can fire for any fields the text LLM left null.
+  layout          -> Layout-aware clause extraction (LayoutLMv3 / heuristic)
+  parallel_extract -> Donut + LayoutLM run concurrently; produces ExtractionBundle
+  policy_fuse     -> ReflexivePolicyLayer fuses both sets of candidates
+  schema_resolve  -> Groq agent normalises, searches registry, maps or synthesises
+  db_populate     -> Inserts mapped record into SQLite; registers new schemas
+  finalize        -> Packages final output dict
+
+State extensions vs. original
+------------------------------
+  bundle          : ExtractionBundle  (added)
+  policy_result   : PolicyResult      (added)
+  resolved_schema : Dict              (added -- may differ from input schema)
+  schema_id       : str               (added -- registry ID)
+  record_id       : str               (added -- DB row UUID)
+  field_mapping   : Dict[str,str]     (added -- source->target field map)
 """
-from langgraph.graph import StateGraph
-from typing import TypedDict, Optional
+from __future__ import annotations
+
 import logging
 from datetime import datetime
+from typing import Any, Dict, List, Optional, TypedDict
 
-from schema.schema import load_schema
-from extraction.form_filler import FormFiller
+from langgraph.graph import StateGraph
+
+from config.config import get_config
 from layout_analysis.layout_structure import LayoutAnalyzer
 from utils.validation import ValidationRecoveryManager
-from config.config import get_config
 
 logger = logging.getLogger(__name__)
 
 
-class ContractState(TypedDict):
-    """State dictionary for contract processing pipeline."""
-    # Input
-    blocks: list
-    page_image: object
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+class ContractState(TypedDict, total=False):
+    # -- Inputs
+    blocks:       list
+    page_image:   Any
     pdf_metadata: dict
 
-    # Intermediate
-    clause_graph: dict
-    schema: dict
+    # -- Layout
+    clause_graph:       dict
     layout_predictions: list
 
-    # Output
-    form: object
+    # -- Parallel extraction
+    bundle: Any  # ExtractionBundle
+
+    # -- Policy fusion
+    policy_result: Any  # PolicyResult
+
+    # -- Schema resolution
+    schema:            dict
+    resolved_schema:   dict
+    schema_id:         str
+    field_mapping:     dict
+    normalised_fields: dict
+
+    # -- DB
+    record_id: str
+
+    # -- Legacy
+    form: Any  # FormInstance
+
+    # -- Output
     output: dict
 
-    # Metadata
+    # -- Metadata
     pipeline_start: str
-    pipeline_end: str
-    errors: list
-    warnings: list
+    pipeline_end:   str
+    errors:         List[str]
+    warnings:       List[str]
 
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
 
 class ContractOrchestrator:
-    """Orchestrates the contract extraction pipeline."""
 
     def __init__(self):
-        self.config = get_config()
+        self.config          = get_config()
         self.layout_analyzer = LayoutAnalyzer()
-        self.form_filler = FormFiller()
-        self.validator = ValidationRecoveryManager()
-        self.graph = self._build_graph()
+        self.validator       = ValidationRecoveryManager()
+        self.graph           = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
-        graph = StateGraph(ContractState)
+        g = StateGraph(ContractState)
 
-        graph.add_node("layout",   self._layout_node)
-        graph.add_node("schema",   self._schema_node)
-        graph.add_node("extract",  self._extraction_node)
-        graph.add_node("validate", self._validation_node)
-        graph.add_node("finalize", self._finalize_node)
+        g.add_node("layout",           self._layout_node)
+        g.add_node("parallel_extract", self._parallel_extract_node)
+        g.add_node("policy_fuse",      self._policy_fuse_node)
+        g.add_node("schema_resolve",   self._schema_resolve_node)
+        g.add_node("validate",         self._validation_node)
+        g.add_node("db_populate",      self._db_populate_node)
+        g.add_node("finalize",         self._finalize_node)
 
-        graph.set_entry_point("layout")
-        graph.add_edge("layout",   "schema")
-        graph.add_edge("schema",   "extract")
-        graph.add_edge("extract",  "validate")
-        graph.add_edge("validate", "finalize")
+        g.set_entry_point("layout")
+        g.add_edge("layout",           "parallel_extract")
+        g.add_edge("parallel_extract", "policy_fuse")
+        g.add_edge("policy_fuse",      "schema_resolve")
+        g.add_edge("schema_resolve",   "validate")
+        g.add_edge("validate",         "db_populate")
+        g.add_edge("db_populate",      "finalize")
 
-        return graph.compile()
+        return g.compile()
 
     # ------------------------------------------------------------------
-    # Nodes
+    # Node 1 -- Layout analysis
     # ------------------------------------------------------------------
 
     def _layout_node(self, state: ContractState) -> ContractState:
-        logger.info("Running layout analysis...")
+        logger.info("--- Node: layout ---")
         try:
             result = self.layout_analyzer.analyze(
                 state["blocks"], state["page_image"]
             )
-            state["clause_graph"] = result["clause_graph"]
+            state["clause_graph"]       = result["clause_graph"]
             state["layout_predictions"] = result.get("predictions", [])
-            logger.info(f"Found {len(state['clause_graph'])} clauses")
-        except Exception as e:
-            logger.error(f"Layout analysis failed: {e}")
-            state.setdefault("errors", []).append(f"Layout: {str(e)}")
+            logger.info("[Layout] %d clauses found", len(state["clause_graph"]))
+        except Exception as exc:
+            logger.error("[Layout] Failed: %s", exc)
+            state.setdefault("errors", []).append(f"Layout: {exc}")
             state["clause_graph"] = {}
+
+        if not state.get("schema"):
+            logger.warning("[Layout] No schema present in state")
+            state["schema"] = {}
+
         return state
 
-    def _schema_node(self, state: ContractState) -> ContractState:
-        logger.info("Loading schema...")
-        try:
-            state["schema"] = load_schema("NDA_Form")
-            logger.info(f"Loaded schema: {state['schema']['form_name']}")
-        except Exception as e:
-            logger.error(f"Schema loading failed: {e}")
-            state.setdefault("errors", []).append(f"Schema: {str(e)}")
-        return state
+    # ------------------------------------------------------------------
+    # Node 2 -- Parallel extraction (Donut + LayoutLM)
+    # ------------------------------------------------------------------
 
-    def _extraction_node(self, state: ContractState) -> ContractState:
-        """
-        Extract fields using text LLM + vision LLM fallback.
-
-        page_image is forwarded to FormFiller so that any field the text LLM
-        leaves null gets a second attempt via the local vision model.
-        """
-        logger.info("Extracting fields (text LLM + vision fallback)...")
+    def _parallel_extract_node(self, state: ContractState) -> ContractState:
+        logger.info("--- Node: parallel_extract ---")
         try:
             full_text = " ".join(
                 str(b.get("text", "")) for b in state.get("blocks", [])
             )
 
-            form = self.form_filler.populate(
-                state["clause_graph"],
-                state["schema"],
-                full_text=full_text,
-                page_image=state.get("page_image"),   # ← enables vision fallback
+            if self.config.enable_parallel_extraction:
+                from extraction.parallel_extractor import ParallelExtractor
+                extractor = ParallelExtractor(
+                    donut_model_id=self.config.model.donut_model
+                )
+                bundle = extractor.extract(
+                    blocks=state.get("blocks", []),
+                    page_image=state["page_image"],
+                    schema=state["schema"],
+                    clause_graph=state.get("clause_graph", {}),
+                    full_text=full_text,
+                )
+            else:
+                logger.info("[ParallelExtract] Donut disabled; running LayoutLM only")
+                from extraction.parallel_extractor import _run_layoutlm, ExtractionBundle
+                lm_result = _run_layoutlm(
+                    state.get("blocks", []),
+                    state["page_image"],
+                    state["schema"],
+                    state.get("clause_graph", {}),
+                    full_text,
+                )
+                bundle = ExtractionBundle(donut=None, layoutlm=lm_result)
+
+            state["bundle"] = bundle
+            logger.info("[ParallelExtract] %s", bundle.summary())
+
+        except Exception as exc:
+            logger.error("[ParallelExtract] Failed: %s", exc)
+            state.setdefault("errors", []).append(f"ParallelExtract: {exc}")
+            from extraction.parallel_extractor import ExtractionBundle
+            state["bundle"] = ExtractionBundle()
+
+        return state
+
+    # ------------------------------------------------------------------
+    # Node 3 -- Reflexive policy fusion
+    # ------------------------------------------------------------------
+
+    def _policy_fuse_node(self, state: ContractState) -> ContractState:
+        logger.info("--- Node: policy_fuse ---")
+        try:
+            from extraction.policy_layer import ReflexivePolicyLayer
+            layer  = ReflexivePolicyLayer(
+                conf_floor=1.0 - self.config.processing.confidence_threshold
+            )
+            result = layer.fuse(state["bundle"], state["schema"])
+            state["policy_result"] = result
+
+            logger.info(
+                "[Policy] coverage=%.2f consistent=%s issues=%d",
+                result.coverage, result.consistency_ok, len(result.issues),
+            )
+            for issue in result.issues:
+                state.setdefault("warnings", []).append(f"Policy: {issue}")
+
+        except Exception as exc:
+            logger.error("[Policy] Failed: %s", exc)
+            state.setdefault("errors", []).append(f"Policy: {exc}")
+            from extraction.policy_layer import PolicyResult
+            lm = state["bundle"].layoutlm if state.get("bundle") else None
+            state["policy_result"] = PolicyResult(
+                fields=lm.fields if lm else {},
+                confidences=lm.confidences if lm else {},
+                spatial_meta=lm.spatial_meta if lm else {},
+                coverage=lm.field_coverage if lm else 0.0,
+                consistency_ok=False,
+                issues=[str(exc)],
             )
 
-            state["form"] = form
-            logger.info(f"Extracted {len(form.fields)} fields")
+        return state
 
-            # Warn about required fields still set to NaN
-            nan_required = [
-                name
-                for name, meta in state["schema"]["fields"].items()
-                if meta.get("required") and form.fields.get(name) == "NaN"
-            ]
-            if nan_required:
+    # ------------------------------------------------------------------
+    # Node 4 -- Schema resolution (Groq agent)
+    # ------------------------------------------------------------------
+
+    def _schema_resolve_node(self, state: ContractState) -> ContractState:
+        logger.info("--- Node: schema_resolve ---")
+        pr     = state.get("policy_result")
+        fields = pr.fields if pr else {}
+
+        if not self.config.enable_schema_agent:
+            logger.info("[SchemaResolve] Agent disabled -- using input schema as-is")
+            state["resolved_schema"]   = state.get("schema", {})
+            state["normalised_fields"] = fields
+            state["field_mapping"]     = {k: k for k in fields}
+            return state
+
+        try:
+            from schema.schema_registry import SchemaRegistry
+            from schema.schema_agent    import SchemaAgent
+
+            registry = SchemaRegistry(
+                registry_dir=self.config.paths.registry_dir,
+                sim_threshold=self.config.processing.schema_sim_threshold,
+            )
+            agent = SchemaAgent(model=self.config.groq.model)
+
+            doc_hint    = state.get("schema", {}).get("form_name", "")
+            norm_fields = agent.normalise_fields(fields, document_hint=doc_hint)
+            state["normalised_fields"] = norm_fields
+            logger.info("[SchemaResolve] Fields normalised")
+
+            hits = registry.find_similar(norm_fields, top_k=1)
+
+            if hits:
+                sim, schema_id, matched_schema = hits[0]
+                logger.info(
+                    "[SchemaResolve] Registry hit: '%s' (sim=%.3f)",
+                    matched_schema.get("form_name"), sim,
+                )
+                mapped_values, mapping = agent.map_fields(norm_fields, matched_schema)
+                state["resolved_schema"]   = matched_schema
+                state["schema_id"]         = schema_id
+                state["field_mapping"]     = mapping
+                state["normalised_fields"] = mapped_values
+
+            else:
+                logger.info("[SchemaResolve] No registry match -- synthesising new schema")
+                new_schema = agent.synthesise_schema(norm_fields, document_hint=doc_hint)
+                schema_id  = registry.register(new_schema)
+                state["resolved_schema"]   = new_schema
+                state["schema_id"]         = schema_id
+                state["field_mapping"]     = {k: k for k in norm_fields}
                 state.setdefault("warnings", []).append(
-                    f"Required fields not found after all passes: "
-                    f"{', '.join(nan_required)}"
+                    f"New schema synthesised and registered: "
+                    f"'{new_schema.get('form_name')}' ({schema_id})"
+                )
+                logger.info(
+                    "[SchemaResolve] Registered new schema '%s' as %s",
+                    new_schema.get("form_name"), schema_id,
                 )
 
-        except Exception as e:
-            logger.error(f"Extraction failed: {e}")
-            state.setdefault("errors", []).append(f"Extraction: {str(e)}")
+        except Exception as exc:
+            logger.error("[SchemaResolve] Failed: %s", exc)
+            state.setdefault("errors", []).append(f"SchemaResolve: {exc}")
+            state["resolved_schema"]   = state.get("schema", {})
+            state["normalised_fields"] = fields
+            state["field_mapping"]     = {k: k for k in fields}
+            state.setdefault("schema_id", "")
+
         return state
+
+    # ------------------------------------------------------------------
+    # Node 5 -- Validation + recovery
+    # ------------------------------------------------------------------
 
     def _validation_node(self, state: ContractState) -> ContractState:
-        logger.info("Validating fields...")
+        logger.info("--- Node: validate ---")
         if not self.config.enable_validation:
-            logger.info("Validation disabled")
             return state
-        try:
-            form = state.get("form")
-            if not form:
-                return state
 
-            recovered_data, remaining_errors = self.validator.validate_and_recover(
-                form.fields,
-                state["schema"],
-                state["clause_graph"],
+        fields = state.get("normalised_fields", {})
+        schema = state.get("resolved_schema", state.get("schema", {}))
+
+        if not schema or not fields:
+            return state
+
+        try:
+            recovered, remaining = self.validator.validate_and_recover(
+                fields,
+                schema,
+                state.get("clause_graph", {}),
                 page_image=state.get("page_image"),
             )
-
-            for field, value in recovered_data.items():
-                form.fill(field, value)
-
-            if remaining_errors:
-                state.setdefault("errors", []).extend(remaining_errors)
-                logger.warning(f"Validation errors: {len(remaining_errors)}")
+            state["normalised_fields"] = recovered
+            if remaining:
+                state.setdefault("errors", []).extend(remaining)
+                logger.warning("[Validate] %d unrecovered errors", len(remaining))
             else:
-                logger.info("All validations passed")
+                logger.info("[Validate] All fields valid")
+        except Exception as exc:
+            logger.error("[Validate] Failed: %s", exc)
+            state.setdefault("errors", []).append(f"Validate: {exc}")
 
-        except Exception as e:
-            logger.error(f"Validation failed: {e}")
-            state.setdefault("errors", []).append(f"Validation: {str(e)}")
         return state
 
-    def _finalize_node(self, state: ContractState) -> ContractState:
-        logger.info("Finalizing output...")
-        form = state.get("form")
-        if form:
-            output = form.to_dict()
-            output["pipeline_metadata"] = {
-                "start_time":   state.get("pipeline_start"),
-                "end_time":     datetime.now().isoformat(),
-                "num_clauses":  len(state.get("clause_graph", {})),
-                "errors":       state.get("errors", []),
-                "warnings":     state.get("warnings", []),
-                "pdf_metadata": state.get("pdf_metadata", {}),
-            }
-            state["output"] = output
-        else:
-            state["output"] = {"error": "No form generated"}
+    # ------------------------------------------------------------------
+    # Node 6 -- Database population
+    # ------------------------------------------------------------------
 
+    def _db_populate_node(self, state: ContractState) -> ContractState:
+        logger.info("--- Node: db_populate ---")
+        if not self.config.enable_db_population:
+            logger.info("[DB] Population disabled")
+            return state
+
+        try:
+            from database.db_manager import DatabaseManager
+            db = DatabaseManager(db_url=str(self.config.paths.db_path))
+
+            schema   = state.get("resolved_schema") or state.get("schema", {})
+            fields   = state.get("normalised_fields", {})
+            pr       = state.get("policy_result")
+            conf_avg = (
+                sum(pr.confidences.values()) / len(pr.confidences)
+                if pr and pr.confidences else 0.0
+            )
+            pdf_meta = state.get("pdf_metadata", {})
+            source   = pdf_meta.get("title") or pdf_meta.get("source_path", "")
+
+            record_id = db.insert_record(
+                schema=schema,
+                fields=fields,
+                schema_id=state.get("schema_id", ""),
+                source_doc=source,
+                confidence_avg=conf_avg,
+            )
+            state["record_id"] = record_id
+            logger.info("[DB] Record inserted: %s", record_id)
+
+        except Exception as exc:
+            logger.error("[DB] Population failed: %s", exc)
+            state.setdefault("errors", []).append(f"DB: {exc}")
+
+        return state
+
+    # ------------------------------------------------------------------
+    # Node 7 -- Finalize output
+    # ------------------------------------------------------------------
+
+    def _finalize_node(self, state: ContractState) -> ContractState:
+        logger.info("--- Node: finalize ---")
+        pr     = state.get("policy_result")
+        schema = state.get("resolved_schema") or state.get("schema", {})
+        fields = state.get("normalised_fields", {})
+
+        output: Dict[str, Any] = {
+            "form":          schema.get("form_name", "Unknown"),
+            "schema_id":     state.get("schema_id", ""),
+            "record_id":     state.get("record_id", ""),
+            "fields":        fields,
+            "field_mapping": state.get("field_mapping", {}),
+            "is_complete":   _check_complete(fields, schema),
+            "pipeline_metadata": {
+                "start_time":     state.get("pipeline_start"),
+                "end_time":       datetime.now().isoformat(),
+                "num_clauses":    len(state.get("clause_graph", {})),
+                "field_coverage": pr.coverage if pr else 0.0,
+                "consistency_ok": pr.consistency_ok if pr else True,
+                "errors":         state.get("errors", []),
+                "warnings":       state.get("warnings", []),
+                "pdf_metadata":   state.get("pdf_metadata", {}),
+                "confidences":    pr.confidences if pr else {},
+                "spatial_meta":   pr.spatial_meta if pr else {},
+            },
+        }
+        state["output"]       = output
         state["pipeline_end"] = datetime.now().isoformat()
+        logger.info(
+            "[Finalize] Done -- form=%s complete=%s record=%s",
+            output["form"], output["is_complete"], output["record_id"],
+        )
         return state
 
     # ------------------------------------------------------------------
@@ -194,20 +406,31 @@ class ContractOrchestrator:
 
     def process(self, state: ContractState) -> ContractState:
         state["pipeline_start"] = datetime.now().isoformat()
-        state.setdefault("errors", [])
+        state.setdefault("errors",   [])
         state.setdefault("warnings", [])
-        logger.info("Starting contract processing pipeline")
-        try:
-            final_state = self.graph.invoke(state)
-            logger.info("Pipeline completed successfully")
-            return final_state
-        except Exception as e:
-            logger.error(f"Pipeline failed: {e}")
-            raise
+        logger.info("=" * 55)
+        logger.info("  Agentic ETL Fabric -- starting pipeline")
+        logger.info("=" * 55)
+        final = self.graph.invoke(state)
+        logger.info("=" * 55)
+        logger.info("  Pipeline complete")
+        logger.info("=" * 55)
+        return final
 
 
 # ---------------------------------------------------------------------------
-# Singleton helpers
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _check_complete(fields: Dict, schema: Dict) -> bool:
+    for fname, meta in schema.get("fields", {}).items():
+        if meta.get("required") and fields.get(fname) is None:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Singleton
 # ---------------------------------------------------------------------------
 
 _orchestrator: Optional[ContractOrchestrator] = None

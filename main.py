@@ -1,424 +1,325 @@
 """
-Simplified main entrypoint: run the full pipeline on a single NDA PDF
+Agentic ETL Fabric -- main entry point.
 
-Behavior:
- - Looks for `data/raw/NDA.pdf`; if not found, falls back to
-     `data/raw/sample_contract_form.pdf` if available.
- - Runs the existing pipeline and writes:
-     - Intermediate phase outputs to data/intermediate/
-     - Final extraction to configured output dir
- - Supports --use-llama flag for direct Llama 3.2 vision extraction
+Usage
+-----
+    python main.py --pdf data/raw/sample_contract_form.pdf --form invoice_schema
+    python main.py --pdf contract.pdf --schema-id <schema_uuid>
+    python main.py --pdf contract.pdf --no-schema-agent   # offline mode
+    python main.py --pdf contract.pdf --no-donut          # LayoutLM only
+    python main.py --list-schemas
+    python main.py --query-db invoice_schema
+
+Environment variables
+---------------------
+    GROQ_API_KEY   -- required for schema-resolution agent
 """
+import argparse
 import json
-import logging
 import sys
 from pathlib import Path
-import argparse
+
+import fitz
+from PIL import Image
 
 from config.config import get_config, update_config
-from ingestion.ingestion import ingest_pdf
-from orchestration.orchestrator import get_orchestrator
-from schema.schema import load_schema
-# from extraction.llama_extractor import LlamaDirectExtractor
 
-from PIL import Image
-import fitz
+# Configure logging before any other imports that may call getLogger().
+# utils/logging_setup.py forces UTF-8 on the stdout handler so that
+# non-ASCII log messages (from other modules) do not crash on Windows.
 
-# Minimal logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+import logging
 logger = logging.getLogger(__name__)
 
 
-def setup_directories():
+# ---------------------------------------------------------------------------
+# Directory bootstrap
+# ---------------------------------------------------------------------------
+
+def setup_directories() -> None:
     cfg = get_config()
-    for p in [cfg.paths.raw_dir, cfg.paths.output_dir, cfg.paths.schema_dir, cfg.paths.test_dir]:
+    for p in [cfg.paths.raw_dir, cfg.paths.output_dir, cfg.paths.schema_dir,
+              cfg.paths.test_dir, cfg.paths.registry_dir]:
         p.mkdir(parents=True, exist_ok=True)
-    
-    # Create intermediate dir for phase outputs
-    intermediate_dir = Path("data") / "intermediate"
-    intermediate_dir.mkdir(parents=True, exist_ok=True)
+    (Path("data") / "intermediate").mkdir(parents=True, exist_ok=True)
 
 
-def extract_contract(pdf_path: Path, output_path: Path | None = None, form_name: str = "NDA_Form", 
-                     use_llama: bool = False) -> dict:
-    logger.info(f"Processing: {pdf_path}")
-    
-    method = "Full Pipeline"
-    # if use_llama:
-    #     method = "Llama 3.2 Vision (Ollama)"
-    
-    logger.info(f"Using extraction method: {method}")
-    
-    intermediate_dir = Path("data") / "intermediate"
+# ---------------------------------------------------------------------------
+# Core pipeline runner
+# ---------------------------------------------------------------------------
 
-    # Load first page image (needed for both methods)
-    doc = fitz.open(str(pdf_path))
+def run_pipeline(
+    pdf_path: Path,
+    form_name: "str | None" = None,
+    schema_id: "str | None" = None,
+    output_path: "Path | None" = None,
+) -> dict:
+    """Run the full agentic ETL pipeline. Returns the final output dict."""
+    from ingestion.ingestion import ingest_pdf
+    from orchestration.orchestrator import get_orchestrator
+    from schema.schema import load_schema
+
+    logger.info("Processing PDF: %s", pdf_path)
+
+    # 1. Ingest
+    blocks, metadata = ingest_pdf(str(pdf_path))
+    logger.info("Ingested %d blocks from %d pages", len(blocks), metadata["total_pages"])
+
+    # 2. First-page image
+    doc  = fitz.open(str(pdf_path))
     page = doc.load_page(0)
-    pix = page.get_pixmap()
+    pix  = page.get_pixmap()
     page_image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     doc.close()
-    
-    logger.info("Loaded page image")
-    
-    # Load schema
-    schema = load_schema(form_name)
-    if not schema:
-        logger.error(f"Schema '{form_name}' not found")
-        return {}
-    
-    # (Direct vision extractors such as Llama can be enabled via flags.)
-    
-    # # Use Llama direct extraction if requested
-    # if use_llama:
-    #     try:
-    #         logger.info("Starting Llama 3.2 direct extraction (local Ollama)...")
-    #         logger.info("Ensure Ollama is running: ollama pull llama2-vision && ollama serve")
-    #         extractor = LlamaDirectExtractor()
-    #         extracted_fields = extractor.extract(page_image, schema)
-            
-    #         # Format output
-    #         output_data = {
-    #             "form": form_name,
-    #             "fields": extracted_fields,
-    #             "extraction_method": "llama_vision_ollama",
-    #             "is_complete": all(v is not None for v in extracted_fields.values()),
-    #             "pipeline_metadata": {
-    #                 "extraction_timestamp": __import__("datetime").datetime.now().isoformat(),
-    #                 "num_fields": len(extracted_fields),
-    #                 "num_fields_extracted": sum(1 for v in extracted_fields.values() if v is not None)
-    #             }
-    #         }
-            
-    #         if output_path is None:
-    #             cfg = get_config()
-    #             output_path = cfg.paths.output_dir / f"extracted_llama_{pdf_path.stem}.json"
-            
-    #         output_path.parent.mkdir(parents=True, exist_ok=True)
-    #         with open(output_path, "w", encoding="utf-8") as f:
-    #             json.dump(output_data, f, indent=2)
-            
-    #         logger.info(f"Saved Llama extraction to: {output_path}")
-    #         return output_data
-            
-    #     except Exception as e:
-    #         logger.error(f"Llama extraction failed: {e}")
-    #         import traceback
-    #         logger.debug(traceback.format_exc())
-    #         sys.exit(1)
-    
-    # Standard pipeline extraction
-    # Ingest PDF
-    logger.info("Ingesting PDF...")
-    blocks, metadata = ingest_pdf(str(pdf_path))
-    
-    # Save ingestion output
-    ingest_output = {
-        "num_blocks": len(blocks),
-        "metadata": metadata,
-        "blocks_preview": [{"text": b.get("text", "")[:100], "bbox": b.get("bbox")} for b in blocks[:10]]
-    }
-    with open(intermediate_dir / "01_ingestion.json", "w", encoding="utf-8") as f:
-        json.dump(ingest_output, f, indent=2)
-    logger.info(f"Saved ingestion output to data/intermediate/01_ingestion.json")
 
+    # 3. Load the nominal schema (schema_resolve node may replace it)
+    if not form_name and not schema_id:
+        cfg = get_config()
+        if not cfg.enable_schema_recognition:
+            raise ValueError("A schema must be provided via --form or --schema-id")
+        from schema.schema_recognizer import SchemaRecognizer
+
+        recognizer = SchemaRecognizer(
+            layout_model_path=cfg.model.schema_recognition_layout_model,
+            donut_model_path=cfg.model.schema_recognition_donut_model,
+        )
+        prediction = recognizer.predict(page_image)
+        form_name = prediction["schema_name"]
+        logger.info(
+            "Auto-recognized schema: %s via %s (confidence=%.3f)",
+            form_name,
+            prediction["source"],
+            prediction["confidence"],
+        )
+
+    schema = load_schema(form_name=form_name, schema_id=schema_id)
+
+    # 4. Build initial pipeline state
     state = {
-        "blocks": blocks,
-        "page_image": page_image,
-        "pdf_metadata": metadata,
+        "blocks":       blocks,
+        "page_image":   page_image,
+        "pdf_metadata": {**metadata, "source_path": str(pdf_path)},
+        "schema_recognition": {"form_name": form_name, "schema_id": schema_id},
+        "schema":       schema,
         "clause_graph": {},
-        "schema": {},
-        "output": {}
+        "output":       {},
+        "errors":       [],
+        "warnings":     [],
     }
 
-    # Run orchestrator (which has multiple phases)
+    # 5. Run pipeline
     orchestrator = get_orchestrator()
-    final_state = orchestrator.process(state)
-    
-    # Save intermediate phase outputs
-    layout_output = {
-        "num_clauses": len(final_state.get("clause_graph", {})),
-        "layout_predictions": final_state.get("layout_predictions", [])[:5]  # Preview
-    }
-    with open(intermediate_dir / "02_layout_analysis.json", "w", encoding="utf-8") as f:
-        json.dump(layout_output, f, indent=2)
-    logger.info("Saved layout analysis output to data/intermediate/02_layout_analysis.json")
-    
-    schema_output = {
-        "form_name": final_state.get("schema", {}).get("form_name", "Unknown"),
-        "num_fields": len(final_state.get("schema", {}).get("fields", []))
-    }
-    with open(intermediate_dir / "03_schema.json", "w", encoding="utf-8") as f:
-        json.dump(schema_output, f, indent=2)
-    logger.info("Saved schema output to data/intermediate/03_schema.json")
-    
-    # Extract and validation happen in final_state
-    extraction_output = {
-        "num_fields_extracted": len(final_state.get("form", {}).fields) if final_state.get("form") else 0,
-        "is_complete": final_state.get("form", {}).is_complete() if final_state.get("form") else False
-    }
-    with open(intermediate_dir / "04_extraction.json", "w", encoding="utf-8") as f:
-        json.dump(extraction_output, f, indent=2)
-    logger.info("Saved extraction output to data/intermediate/04_extraction.json")
-    
-    validation_output = {
-        "errors": final_state.get("errors", []),
-        "warnings": final_state.get("warnings", [])
-    }
-    with open(intermediate_dir / "05_validation.json", "w", encoding="utf-8") as f:
-        json.dump(validation_output, f, indent=2)
-    logger.info("Saved validation output to data/intermediate/05_validation.json")
+    final_state  = orchestrator.process(state)
+    output_data  = final_state.get("output", {})
 
-    output_data = final_state.get("output", {})
-
+    # 6. Save output (explicit UTF-8 so non-ASCII values in field data are safe)
     if output_path is None:
         cfg = get_config()
         output_path = cfg.paths.output_dir / f"extracted_{pdf_path.stem}.json"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, indent=2)
-
-    logger.info(f"Saved final extraction to: {output_path}")
-    return output_data
-
-
-def main():
-    # Parse arguments
-    parser = argparse.ArgumentParser(description="NDA Extraction - Pipeline or vision-based extraction")
-    parser.add_argument("--form", default="NDA_Form", help="Form schema name (default: NDA_Form)")
-    parser.add_argument(
-        '--use-llama',
-        action='store_true',
-        help='Use Llama 3.2 vision for direct extraction (requires local Ollama)'
+    output_path.write_text(
+        json.dumps(output_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
-    args = parser.parse_args()
-    
-    # Ensure directories
-    setup_directories()
+    logger.info("Output written to: %s", output_path)
 
-    raw_dir = Path("data") / "raw"
-    nda_path = raw_dir / "NDA.pdf"
-    sample_path = raw_dir / "sample_contract_form.pdf"
+    # 7. Save intermediate phase summaries
+    _save_intermediates(final_state)
 
-    if nda_path.exists():
-        pdf_to_process = nda_path
-    elif sample_path.exists():
-        logger.info("NDA.pdf not found, falling back to sample_contract_form.pdf")
-        pdf_to_process = sample_path
-    else:
-        logger.error("No NDA found in data/raw. Please add data/raw/NDA.pdf")
-        sys.exit(1)
-
-    try:
-        result = extract_contract(pdf_to_process, use_llama=args.use_llama, form_name=args.form)
-        print(json.dumps(result.get("fields", {}), indent=2))
-    except Exception as e:
-        logger.exception("Extraction failed")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
-"""
-Main entry point for contract extraction system.
-"""
-import json
-import fitz
-from PIL import Image
-import argparse
-import logging
-from pathlib import Path
-import sys
-
-from config.config import get_config, update_config
-from ingestion.ingestion import ingest_pdf
-from orchestration.orchestrator import get_orchestrator
-from evaluation.evaluator import Evaluator
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('contract_extraction.log')
-    ]
-)
-
-logger = logging.getLogger(__name__)
-
-
-def setup_directories():
-    """Ensure all required directories exist."""
-    config = get_config()
-    for dir_path in [config.paths.raw_dir, config.paths.output_dir, 
-                     config.paths.schema_dir, config.paths.test_dir]:
-        dir_path.mkdir(parents=True, exist_ok=True)
-
-
-def extract_contract(pdf_path: str, output_path: str = None, 
-                    form_name: str = "NDA_Form") -> dict:
-    """
-    Extract structured data from a contract PDF.
-    
-    Args:
-        pdf_path: Path to PDF file
-        output_path: Optional output path for JSON
-        form_name: Form schema to use
-        
-    Returns:
-        Extraction result dictionary
-    """
-    logger.info(f"Processing: {pdf_path}")
-    
-    # Ingest PDF
-    logger.info("Step 1/4: Ingesting PDF...")
-    blocks, metadata = ingest_pdf(pdf_path)
-    logger.info(f"Extracted {len(blocks)} text blocks")
-    
-    # Get page image for layout analysis
-    logger.info("Step 2/4: Loading page image...")
-    doc = fitz.open(pdf_path)
-    page = doc.load_page(0)  # Use first page for layout
-    pix = page.get_pixmap()
-    page_image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    doc.close()
-    
-    # Build initial state
-    state = {
-        "blocks": blocks,
-        "page_image": page_image,
-        "pdf_metadata": metadata,
-        "clause_graph": {},
-        "schema": {},
-        "output": {}
-    }
-    
-    # Run pipeline
-    logger.info("Step 3/4: Running extraction pipeline...")
-    orchestrator = get_orchestrator()
-    final_state = orchestrator.process(state)
-    
-    # Save output
-    logger.info("Step 4/4: Saving output...")
-    output_data = final_state["output"]
-    
-    if output_path:
-        output_file = Path(output_path)
-    else:
-        config = get_config()
-        output_file = config.paths.output_dir / f"extracted_{Path(pdf_path).stem}.json"
-    
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_file, 'w') as f:
-        json.dump(output_data, f, indent=2)
-    
-    logger.info(f"Output saved to: {output_file}")
-    
-    # Print summary
-    print("\n" + "="*60)
-    print("EXTRACTION SUMMARY")
-    print("="*60)
-    print(f"Form: {output_data.get('form', 'Unknown')}")
-    print(f"Complete: {output_data.get('is_complete', False)}")
-    print(f"Fields extracted: {len(output_data.get('fields', {}))}")
-    
-    errors = output_data.get('pipeline_metadata', {}).get('errors', [])
-    if errors:
-        print(f"\nErrors: {len(errors)}")
-        for error in errors[:3]:
-            print(f"  - {error}")
-    
-    warnings = output_data.get('pipeline_metadata', {}).get('warnings', [])
-    if warnings:
-        print(f"\nWarnings: {len(warnings)}")
-        for warning in warnings[:3]:
-            print(f"  - {warning}")
-    
-    print("="*60 + "\n")
-    
+    # 8. Print summary (ASCII-only to avoid console encoding errors)
+    _print_summary(output_data)
     return output_data
 
 
-def evaluate_system(test_dir: str):
-    """
-    Run evaluation on test set.
-    
-    Args:
-        test_dir: Directory containing test cases
-    """
-    logger.info(f"Running evaluation on: {test_dir}")
-    
-    evaluator = Evaluator(test_data_dir=Path(test_dir))
-    test_cases = evaluator.load_test_set()
-    
-    if not test_cases:
-        logger.error("No test cases found")
+# ---------------------------------------------------------------------------
+# Utility commands
+# ---------------------------------------------------------------------------
+
+def list_schemas() -> None:
+    from schema.schema import SchemaManager
+
+    manager = SchemaManager()
+    schemas = manager.list_schemas()
+    if not schemas:
+        print("Schema store is empty. Insert schemas into SQLite before running the pipeline.")
         return
-    
-    logger.info(f"Found {len(test_cases)} test cases")
-    
-    results = []
-    for i, test_case in enumerate(test_cases, 1):
-        logger.info(f"Evaluating test case {i}/{len(test_cases)}")
-        
-        # Define extraction function for this test case
-        def extraction_fn(tc):
-            pdf_path = tc.get("pdf_path")
-            result = extract_contract(pdf_path)
-            return result.get("fields", {})
-        
-        comparison = evaluator.compare_with_baseline(test_case, extraction_fn)
-        results.append(comparison)
-    
-    # Generate report
-    report = evaluator.generate_report(results)
-    print("\n" + report)
-    
-    # Save results
-    config = get_config()
-    results_path = config.paths.output_dir / "evaluation_results.json"
-    with open(results_path, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    logger.info(f"Detailed results saved to: {results_path}")
+    print(f"\n{'Schema ID':<38}  {'Form Name':<30}  {'Version':<8}  Updated")
+    print("-" * 96)
+    for entry in schemas:
+        print(
+            f"{entry['schema_id']:<38}  "
+            f"{entry['form_name']:<30}  "
+            f"{entry.get('version', ''):<8}  "
+            f"{entry.get('updated_at', '')[:19]}"
+        )
 
 
-def main():
-    """Main entry point with CLI."""
-    parser = argparse.ArgumentParser(description="NDA Extraction - Pipeline or vision-based extraction")
-    
-    parser.add_argument(
-        '--form',
-        type=str,
-        default='NDA_Form',
-        help='Form schema name (default: NDA_Form)'
+def query_db(form_name: str, limit: int = 20) -> None:
+    from database.db_manager import DatabaseManager
+    db   = DatabaseManager()
+    rows = db.query_records(form_name, limit=limit)
+    if not rows:
+        print(f"No records for '{form_name}'")
+        return
+    print(f"\n{len(rows)} record(s) in '{form_name}':\n")
+    for row in rows:
+        print(json.dumps(dict(row), indent=2, default=str))
+        print("-" * 60)
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _save_intermediates(state: dict) -> None:
+    inter  = Path("data") / "intermediate"
+    bundle = state.get("bundle")
+
+    def _cov(result):
+        return getattr(result, "field_coverage", None) if result else None
+
+    phases = {
+        "01_ingestion.json":        {"num_blocks": len(state.get("blocks", []))},
+        "02_layout.json":           {"num_clauses": len(state.get("clause_graph", {}))},
+        "03_parallel_extract.json": {
+            "donut_coverage":    _cov(bundle.donut)    if bundle else None,
+            "layoutlm_coverage": _cov(bundle.layoutlm) if bundle else None,
+        },
+        "04_policy_fuse.json": {
+            "coverage":       getattr(state.get("policy_result"), "coverage",       None),
+            "consistency_ok": getattr(state.get("policy_result"), "consistency_ok", None),
+            "issues":         getattr(state.get("policy_result"), "issues",         []),
+        },
+        "05_schema_resolve.json": {
+            "resolved_schema": state.get("resolved_schema", {}).get("form_name"),
+            "schema_id":       state.get("schema_id"),
+            "field_mapping":   state.get("field_mapping"),
+        },
+        "06_db.json": {"record_id": state.get("record_id")},
+    }
+    for fname, data in phases.items():
+        (inter / fname).write_text(
+            json.dumps(data, indent=2, default=str), encoding="utf-8"
+        )
+
+
+def _print_summary(output: dict) -> None:
+    """Print extraction summary using only ASCII printable characters."""
+    fields = output.get("fields", {})
+    pm     = output.get("pipeline_metadata", {})
+    errors = pm.get("errors", [])
+    warns  = pm.get("warnings", [])
+
+    sep = "=" * 60
+    print(f"\n{sep}")
+    print("  AGENTIC ETL -- EXTRACTION SUMMARY")
+    print(sep)
+
+    def _trunc(s, n=16):
+        s = str(s)
+        return s[:n] + "..." if len(s) > n else s
+
+    print(f"  Form        : {output.get('form', '?')}")
+    print(f"  Schema ID   : {_trunc(output.get('schema_id', '?'))}")
+    print(f"  Record ID   : {_trunc(output.get('record_id', '?'))}")
+    print(f"  Complete    : {output.get('is_complete', False)}")
+    print(f"  Coverage    : {pm.get('field_coverage', 0.0):.2f}")
+    print(f"  Consistent  : {pm.get('consistency_ok', True)}")
+    print("  Fields      :")
+    for k, v in fields.items():
+        conf = pm.get("confidences", {}).get(k, 0.0)
+        # Encode value to ASCII, replacing anything non-printable
+        v_str = str(v).encode("ascii", errors="replace").decode("ascii")
+        print(f"    {k:<28} = {v_str:<30}  [conf={conf:.2f}]")
+    if errors:
+        print(f"\n  Errors ({len(errors)}):")
+        for e in errors[:5]:
+            e_str = str(e).encode("ascii", errors="replace").decode("ascii")
+            print(f"    [ERROR] {e_str}")
+    if warns:
+        print(f"\n  Warnings ({len(warns)}):")
+        for w in warns[:5]:
+            w_str = str(w).encode("ascii", errors="replace").decode("ascii")
+            print(f"    [WARN]  {w_str}")
+    print(f"{sep}\n")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Agentic ETL Fabric for semi-structured document extraction"
     )
-    
+    parser.add_argument("--pdf",             type=Path, help="Path to input PDF")
+    parser.add_argument("--form",
+                        help="Schema form name stored in SQLite")
+    parser.add_argument("--schema-id",
+                        help="Schema ID stored in SQLite")
+    parser.add_argument("--output",          type=Path, help="JSON output path")
+    parser.add_argument("--no-schema-agent", action="store_true",
+                        help="Disable Groq schema-resolution agent (offline mode)")
+    parser.add_argument("--no-donut",        action="store_true",
+                        help="Disable Donut extractor (LayoutLM only, faster)")
+    parser.add_argument("--no-db",           action="store_true",
+                        help="Disable database population")
+    parser.add_argument("--list-schemas",    action="store_true",
+                        help="List all registered schemas and exit")
+    parser.add_argument("--query-db",        metavar="FORM_NAME",
+                        help="Print DB records for a form name and exit")
+    parser.add_argument("--verbose",         action="store_true",
+                        help="Enable DEBUG logging")
+
     args = parser.parse_args()
-    
-    # Ensure directories
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     setup_directories()
 
-    raw_dir = Path("data") / "raw"
-    nda_path = raw_dir / "NDA.pdf"
-    sample_path = raw_dir / "sample_contract_form.pdf"
+    # -- Utility commands ----------------------------------------------------
+    if args.list_schemas:
+        list_schemas()
+        return
+    if args.query_db:
+        query_db(args.query_db)
+        return
 
-    if nda_path.exists():
-        pdf_to_process = nda_path
-    elif sample_path.exists():
-        logger.info("NDA.pdf not found, falling back to sample_contract_form.pdf")
-        pdf_to_process = sample_path
-    else:
-        logger.error("No NDA found in data/raw. Please add data/raw/NDA.pdf")
+    # -- Feature flags -------------------------------------------------------
+    if args.no_schema_agent:
+        update_config(enable_schema_agent=False)
+    if args.no_donut:
+        update_config(enable_parallel_extraction=False)
+    if args.no_db:
+        update_config(enable_db_population=False)
+
+    # -- PDF resolution ------------------------------------------------------
+    pdf_path = args.pdf
+    if pdf_path is None:
+        raw = Path("data") / "raw"
+        for candidate in ("NDA.pdf", "sample_contract_form.pdf"):
+            p = raw / candidate
+            if p.exists():
+                pdf_path = p
+                break
+    if pdf_path is None or not pdf_path.exists():
+        logger.error("No PDF found. Use --pdf <path> or place a file in data/raw/")
         sys.exit(1)
 
+    # -- Run -----------------------------------------------------------------
     try:
-        result = extract_contract(pdf_to_process, form_name=args.form)
-        print(json.dumps(result.get("fields", {}), indent=2))
-    except Exception as e:
-        logger.exception("Extraction failed")
+        result = run_pipeline(
+            pdf_path,
+            form_name=args.form,
+            schema_id=args.schema_id,
+            output_path=args.output,
+        )
+        # ensure_ascii=True keeps the final JSON print safe on any console
+        print(json.dumps(result.get("fields", {}), indent=2, ensure_ascii=True))
+    except Exception:
+        logger.exception("Pipeline failed")
         sys.exit(1)
 
 
