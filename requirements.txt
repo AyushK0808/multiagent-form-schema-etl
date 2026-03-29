@@ -26,7 +26,7 @@ numpy
 
 # ── Document ingestion ────────────────────────────────────────────────────────
 PyMuPDF
-pytesseract
+pytesseract              # requires native Tesseract OCR installed and available on PATH
 Pillow
 
 # ── Pipeline orchestration ────────────────────────────────────────────────────

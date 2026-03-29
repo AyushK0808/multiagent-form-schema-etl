@@ -25,6 +25,7 @@ class ModelConfig:
     # Layout / token classification
     layout_model: str = "models/layoutlmv3-nda/checkpoint_best"
     schema_recognition_layout_model: str = "models/schema_recognition/layoutlmv3"
+    schema_recognition_layout_fallback_model: str = "microsoft/layoutlmv3-base"
 
     # Text LLM backend  ("ollama/<model>" or a HuggingFace model ID)
     llm_model:       str   = "ollama/llama3.2"
@@ -34,6 +35,7 @@ class ModelConfig:
     # Donut OCR-free extractor
     donut_model: str = "naver-clova-ix/donut-base-finetuned-docvqa"
     schema_recognition_donut_model: str = "models/schema_recognition/donut"
+    schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base-finetuned-docvqa"
 
     # Device for local models
     device: str = "auto"   # "auto" | "cpu" | "cuda"

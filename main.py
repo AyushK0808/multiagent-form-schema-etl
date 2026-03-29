@@ -82,6 +82,8 @@ def run_pipeline(
         recognizer = SchemaRecognizer(
             layout_model_path=cfg.model.schema_recognition_layout_model,
             donut_model_path=cfg.model.schema_recognition_donut_model,
+            layout_fallback_model=cfg.model.schema_recognition_layout_fallback_model,
+            donut_fallback_model=cfg.model.schema_recognition_donut_fallback_model,
         )
         prediction = recognizer.predict(page_image)
         form_name = prediction["schema_name"]

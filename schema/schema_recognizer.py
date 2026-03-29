@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import torch
+from pytesseract import TesseractNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -22,56 +23,88 @@ def _avg_max_prob(scores) -> float:
     return float(sum(probs) / len(probs))
 
 
+def _is_local_checkpoint(model_ref: str) -> bool:
+    return Path(model_ref).exists()
+
+
+def _select_model_source(primary_model: str, fallback_model: Optional[str]) -> tuple[str, bool]:
+    if _is_local_checkpoint(primary_model):
+        return primary_model, False
+    if fallback_model:
+        logger.info(
+            "[SchemaRecognizer] Local checkpoint '%s' not found, falling back to Hugging Face model '%s'",
+            primary_model,
+            fallback_model,
+        )
+        return fallback_model, True
+    return primary_model, False
+
+
 class LayoutLMv3SchemaRecognizer:
-    def __init__(self, checkpoint_path: str):
-        self.checkpoint_path = Path(checkpoint_path)
+    def __init__(self, checkpoint_path: str, fallback_model: Optional[str] = None):
+        self.checkpoint_path = checkpoint_path
+        self.fallback_model = fallback_model
         self.processor = None
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.using_fallback = False
 
     def available(self) -> bool:
-        return self.checkpoint_path.exists()
+        return _is_local_checkpoint(self.checkpoint_path) or bool(self.fallback_model)
 
     def _load(self) -> None:
         if self.model is not None:
             return
         from transformers import LayoutLMv3ForSequenceClassification, LayoutLMv3Processor
 
-        self.processor = LayoutLMv3Processor.from_pretrained(str(self.checkpoint_path), apply_ocr=True)
-        self.model = LayoutLMv3ForSequenceClassification.from_pretrained(str(self.checkpoint_path))
+        model_source, using_fallback = _select_model_source(self.checkpoint_path, self.fallback_model)
+        self.using_fallback = using_fallback
+        self.processor = LayoutLMv3Processor.from_pretrained(model_source, apply_ocr=True)
+        self.model = LayoutLMv3ForSequenceClassification.from_pretrained(model_source)
         self.model.to(self.device).eval()
 
     def predict(self, image) -> Optional[Dict]:
         if not self.available():
             return None
         self._load()
-        encoded = self.processor(images=image, return_tensors="pt", truncation=True, padding="max_length")
+        try:
+            encoded = self.processor(images=image, return_tensors="pt", truncation=True, padding="max_length")
+        except TesseractNotFoundError:
+            logger.warning(
+                "[SchemaRecognizer] Skipping LayoutLMv3 schema recognition because Tesseract is not installed"
+            )
+            return None
         encoded = {k: v.to(self.device) for k, v in encoded.items()}
         with torch.no_grad():
             outputs = self.model(**encoded)
             probs = torch.softmax(outputs.logits, dim=-1)[0]
         label_id = int(torch.argmax(probs).item())
         label = self.model.config.id2label[str(label_id)] if str(label_id) in self.model.config.id2label else self.model.config.id2label[label_id]
-        return {"schema_name": label, "confidence": float(probs[label_id].item()), "source": "layoutlmv3"}
+        source = "layoutlmv3_hf_fallback" if self.using_fallback else "layoutlmv3"
+        return {"schema_name": label, "confidence": float(probs[label_id].item()), "source": source}
 
 
 class DonutSchemaRecognizer:
-    def __init__(self, checkpoint_path: str):
-        self.checkpoint_path = Path(checkpoint_path)
+    def __init__(self, checkpoint_path: str, fallback_model: Optional[str] = None):
+        self.checkpoint_path = checkpoint_path
+        self.fallback_model = fallback_model
         self.processor = None
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.using_fallback = False
 
     def available(self) -> bool:
-        return self.checkpoint_path.exists()
+        return _is_local_checkpoint(self.checkpoint_path) or bool(self.fallback_model)
 
     def _load(self) -> None:
         if self.model is not None:
             return
         from transformers import DonutProcessor, VisionEncoderDecoderModel
 
-        self.processor = DonutProcessor.from_pretrained(str(self.checkpoint_path))
-        self.model = VisionEncoderDecoderModel.from_pretrained(str(self.checkpoint_path))
+        model_source, using_fallback = _select_model_source(self.checkpoint_path, self.fallback_model)
+        self.using_fallback = using_fallback
+        self.processor = DonutProcessor.from_pretrained(model_source)
+        self.model = VisionEncoderDecoderModel.from_pretrained(model_source)
         self.model.to(self.device).eval()
 
     def predict(self, image) -> Optional[Dict]:
@@ -102,7 +135,7 @@ class DonutSchemaRecognizer:
         if not prediction:
             return None
         prediction["confidence"] = _avg_max_prob(outputs.scores)
-        prediction["source"] = "donut"
+        prediction["source"] = "donut_hf_fallback" if self.using_fallback else "donut"
         return prediction
 
     @staticmethod
@@ -119,14 +152,24 @@ class DonutSchemaRecognizer:
 
 
 class SchemaRecognizer:
-    def __init__(self, layout_model_path: str, donut_model_path: str):
-        self.layout = LayoutLMv3SchemaRecognizer(layout_model_path)
-        self.donut = DonutSchemaRecognizer(donut_model_path)
+    def __init__(
+        self,
+        layout_model_path: str,
+        donut_model_path: str,
+        layout_fallback_model: Optional[str] = None,
+        donut_fallback_model: Optional[str] = None,
+    ):
+        self.layout = LayoutLMv3SchemaRecognizer(layout_model_path, fallback_model=layout_fallback_model)
+        self.donut = DonutSchemaRecognizer(donut_model_path, fallback_model=donut_fallback_model)
 
     def predict(self, image) -> Dict:
         candidates = [result for result in (self.layout.predict(image), self.donut.predict(image)) if result]
         if not candidates:
-            raise FileNotFoundError("No schema recognition checkpoint found for LayoutLMv3 or Donut")
+            raise RuntimeError(
+                "Automatic schema recognition could not determine a schema. "
+                "Provide --form/--schema-id, install Tesseract for LayoutLMv3 OCR, "
+                "or fine-tune the schema recognition checkpoints."
+            )
 
         by_name: Dict[str, Dict] = {}
         for candidate in candidates:
