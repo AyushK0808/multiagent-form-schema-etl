@@ -1,17 +1,12 @@
 """
 finetune/data_loader.py
-=======================
-Loads, normalises, augments, and concatenates datasets into the unified
-intermediate format consumed by both trainers.
-
-Public API
-----------
-build_combined_dataset(dataset_names, ...) → (train, val, label2id, id2label, manifest)
 """
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import asdict
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
@@ -21,6 +16,41 @@ from config import DATASET_SPECS, DatasetSpec
 from normalizers import NORMALIZERS, normalize_generic
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace authentication — load .env from project root if present
+# ---------------------------------------------------------------------------
+
+def _hf_login() -> None:
+    """Authenticate with the HF Hub using HF_TOKEN from the environment or .env."""
+    # Walk up from finetune/ to find .env at the project root
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(env_path)
+            logger.info("[HF] Loaded .env from %s", env_path)
+        except ImportError:
+            logger.warning("[HF] python-dotenv not installed; set HF_TOKEN manually")
+
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        logger.warning(
+            "[HF] HF_TOKEN not set — gated datasets will return 401. "
+            "Add HF_TOKEN=<your_token> to .env or the environment."
+        )
+        return
+
+    try:
+        from huggingface_hub import login
+        login(token=token, add_to_git_credential=False)
+        logger.info("[HF] Authenticated with HuggingFace Hub")
+    except Exception as exc:
+        logger.warning("[HF] Hub login failed: %s", exc)
+
+
+_hf_login()
 
 
 # ---------------------------------------------------------------------------
@@ -36,13 +66,20 @@ def _load_single_dataset(
     from datasets import load_dataset
 
     logger.info("[DataLoader] Loading %s from %s", spec.name, spec.repo_id)
+
+    load_kwargs: Dict = {}
+    if spec.config_name:
+        load_kwargs["name"] = spec.config_name
+    if spec.trust_remote_code:
+        load_kwargs["trust_remote_code"] = True
+
     try:
-        ds = load_dataset(spec.repo_id)
+        ds = load_dataset(spec.repo_id, **load_kwargs)
     except Exception as exc:
         logger.warning("[DataLoader] Could not load %s: %s — skipping", spec.name, exc)
         return None, None
 
-    # Standardise splits: ensure "train" and "validation" always exist
+    # Standardise splits
     if "train" not in ds:
         only = next(iter(ds.keys()))
         sp = ds[only].train_test_split(test_size=0.1, seed=42)
@@ -96,7 +133,7 @@ def _load_single_dataset(
 
 
 # ---------------------------------------------------------------------------
-# Combined loader
+# Combined loader  (unchanged from original)
 # ---------------------------------------------------------------------------
 
 def build_combined_dataset(
@@ -106,17 +143,6 @@ def build_combined_dataset(
     augment_train: bool = True,
     curriculum: bool = False,
 ):
-    """
-    Load and concatenate multiple datasets.
-
-    If curriculum=True, datasets are ordered by DatasetSpec.curriculum_order
-    (simpler/cleaner data first) before concatenation, which helps Donut
-    build up schema recognition progressively.
-
-    Returns
-    -------
-    train_dataset, val_dataset, label2id, id2label, manifest
-    """
     from datasets import concatenate_datasets
 
     specs = [DATASET_SPECS[n] for n in dataset_names]
