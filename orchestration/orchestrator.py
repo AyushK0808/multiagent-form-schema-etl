@@ -1,23 +1,23 @@
 """
 Agentic ETL Orchestrator
 ========================
-LangGraph pipeline with six sequential nodes:
+LangGraph pipeline with eight sequential nodes:
 
-  layout          -> Layout-aware clause extraction (LayoutLMv3 / heuristic)
+  layout          -> Layout-aware clause extraction (LoRA adapter / heuristic)
   parallel_extract -> Donut + LayoutLM run concurrently; produces ExtractionBundle
   policy_fuse     -> ReflexivePolicyLayer fuses both sets of candidates
+  repair          -> Groq repair pass on fused fields
   schema_resolve  -> Groq agent normalises, searches registry, maps or synthesises
-  db_populate     -> Inserts mapped record into SQLite; registers new schemas
+  validate        -> Field validation + recovery
+  db_populate     -> Inserts mapped record into SQLite
   finalize        -> Packages final output dict
 
-State extensions vs. original
-------------------------------
-  bundle          : ExtractionBundle  (added)
-  policy_result   : PolicyResult      (added)
-  resolved_schema : Dict              (added -- may differ from input schema)
-  schema_id       : str               (added -- registry ID)
-  record_id       : str               (added -- DB row UUID)
-  field_mapping   : Dict[str,str]     (added -- source->target field map)
+LoRA adapter routing
+--------------------
+The adapter group is resolved once from the recognised schema name at the
+start of the pipeline (via adapter_groups.group_for_schema) and stored in
+state["adapter_group"].  Both the layout node and parallel_extract node
+read this value to activate the correct LoRA adapter.
 """
 from __future__ import annotations
 
@@ -39,22 +39,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class ContractState(TypedDict, total=False):
-    # -- Inputs
+    # Inputs
     blocks:       list
     page_image:   Any
     pdf_metadata: dict
 
-    # -- Layout
+    # LoRA routing — resolved once from schema_recognition.form_name
+    adapter_group: str   # "group_1" | "group_2" | "group_3"
+
+    # Layout
     clause_graph:       dict
     layout_predictions: list
 
-    # -- Parallel extraction
-    bundle: Any  # ExtractionBundle
+    # Parallel extraction
+    bundle: Any   # ExtractionBundle
 
-    # -- Policy fusion
-    policy_result: Any  # PolicyResult
+    # Policy fusion
+    policy_result: Any   # PolicyResult
 
-    # -- Schema resolution
+    # Schema resolution
     schema:            dict
     resolved_schema:   dict
     schema_id:         str
@@ -62,16 +65,16 @@ class ContractState(TypedDict, total=False):
     normalised_fields: dict
     repaired_fields:   dict
 
-    # -- DB
+    # DB
     record_id: str
 
-    # -- Legacy
-    form: Any  # FormInstance
+    # Legacy
+    form: Any   # FormInstance
 
-    # -- Output
+    # Output
     output: dict
 
-    # -- Metadata
+    # Metadata
     pipeline_start: str
     pipeline_end:   str
     errors:         List[str]
@@ -114,18 +117,58 @@ class ContractOrchestrator:
         return g.compile()
 
     # ------------------------------------------------------------------
-    # Node 1 -- Layout analysis
+    # Adapter group resolution  (called before the graph runs)
+    # ------------------------------------------------------------------
+
+    def _resolve_adapter_group(self, state: ContractState) -> str:
+        """
+        Determine which LoRA adapter group to use for this document.
+
+        Priority:
+        1. state["adapter_group"]  — caller pre-set it
+        2. schema_recognition.form_name  → look up in SCHEMA_TO_GROUP
+        3. Default "group_2"
+        """
+        if state.get("adapter_group"):
+            return state["adapter_group"]
+
+        form_name = (
+            state.get("schema_recognition", {}).get("form_name")
+            or state.get("schema", {}).get("form_name", "")
+        )
+        if form_name:
+            try:
+                from finetune.adapter_groups import group_for_schema
+                group = group_for_schema(form_name.lower())
+                logger.info(
+                    "[Orchestrator] Resolved adapter group '%s' for schema '%s'",
+                    group, form_name,
+                )
+                return group
+            except ImportError:
+                pass
+
+        return "group_2"
+
+    # ------------------------------------------------------------------
+    # Node 1 — Layout analysis
     # ------------------------------------------------------------------
 
     def _layout_node(self, state: ContractState) -> ContractState:
         logger.info("--- Node: layout ---")
+        group = state.get("adapter_group", "group_2")
         try:
             result = self.layout_analyzer.analyze(
-                state["blocks"], state["page_image"]
+                state["blocks"],
+                state["page_image"],
+                group_name=group,
             )
             state["clause_graph"]       = result["clause_graph"]
             state["layout_predictions"] = result.get("predictions", [])
-            logger.info("[Layout] %d clauses found", len(state["clause_graph"]))
+            logger.info(
+                "[Layout] %d clauses (adapter_group=%s)",
+                len(state["clause_graph"]), group,
+            )
         except Exception as exc:
             logger.error("[Layout] Failed: %s", exc)
             state.setdefault("errors", []).append(f"Layout: {exc}")
@@ -138,20 +181,20 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 2 -- Parallel extraction (Donut + LayoutLM)
+    # Node 2 — Parallel extraction (Donut + LayoutLM)
     # ------------------------------------------------------------------
 
     def _parallel_extract_node(self, state: ContractState) -> ContractState:
         logger.info("--- Node: parallel_extract ---")
+        group = state.get("adapter_group", "group_2")
         try:
-            full_text = " ".join(
-                str(b.get("text", "")) for b in state.get("blocks", [])
-            )
+            full_text = " ".join(str(b.get("text", "")) for b in state.get("blocks", []))
 
             if self.config.enable_parallel_extraction:
                 from extraction.parallel_extractor import ParallelExtractor
                 extractor = ParallelExtractor(
-                    donut_model_id=self.config.model.donut_model
+                    donut_model_id=self.config.model.donut_model,
+                    adapter_group=group,
                 )
                 bundle = extractor.extract(
                     blocks=state.get("blocks", []),
@@ -161,7 +204,7 @@ class ContractOrchestrator:
                     full_text=full_text,
                 )
             else:
-                logger.info("[ParallelExtract] Donut disabled; running LayoutLM only")
+                logger.info("[ParallelExtract] Donut disabled — LayoutLM only")
                 from extraction.parallel_extractor import _run_layoutlm, ExtractionBundle
                 lm_result = _run_layoutlm(
                     state.get("blocks", []),
@@ -169,6 +212,7 @@ class ContractOrchestrator:
                     state["schema"],
                     state.get("clause_graph", {}),
                     full_text,
+                    adapter_group=group,
                 )
                 bundle = ExtractionBundle(donut=None, layoutlm=lm_result)
 
@@ -184,7 +228,7 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 3 -- Reflexive policy fusion
+    # Node 3 — Reflexive policy fusion
     # ------------------------------------------------------------------
 
     def _policy_fuse_node(self, state: ContractState) -> ContractState:
@@ -196,14 +240,12 @@ class ContractOrchestrator:
             )
             result = layer.fuse(state["bundle"], state["schema"])
             state["policy_result"] = result
-
             logger.info(
                 "[Policy] coverage=%.2f consistent=%s issues=%d",
                 result.coverage, result.consistency_ok, len(result.issues),
             )
             for issue in result.issues:
                 state.setdefault("warnings", []).append(f"Policy: {issue}")
-
         except Exception as exc:
             logger.error("[Policy] Failed: %s", exc)
             state.setdefault("errors", []).append(f"Policy: {exc}")
@@ -217,16 +259,15 @@ class ContractOrchestrator:
                 consistency_ok=False,
                 issues=[str(exc)],
             )
-
         return state
 
     # ------------------------------------------------------------------
-    # Node 4 -- Groq repair pass
+    # Node 4 — Groq repair pass
     # ------------------------------------------------------------------
 
     def _repair_node(self, state: ContractState) -> ContractState:
         logger.info("--- Node: repair ---")
-        pr = state.get("policy_result")
+        pr     = state.get("policy_result")
         fields = pr.fields if pr else {}
         schema = state.get("schema", {})
 
@@ -236,7 +277,6 @@ class ContractOrchestrator:
 
         try:
             from schema.schema_agent import SchemaAgent
-
             agent = SchemaAgent(
                 small_model=self.config.groq.small_model,
                 synthesis_model=self.config.groq.synthesis_model,
@@ -256,7 +296,7 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 5 -- Schema resolution (Groq agent)
+    # Node 5 — Schema resolution
     # ------------------------------------------------------------------
 
     def _schema_resolve_node(self, state: ContractState) -> ContractState:
@@ -265,7 +305,6 @@ class ContractOrchestrator:
         fields = state.get("repaired_fields") or (pr.fields if pr else {})
 
         if not self.config.enable_schema_agent:
-            logger.info("[SchemaResolve] Agent disabled -- using input schema as-is")
             state["resolved_schema"]   = state.get("schema", {})
             state["normalised_fields"] = fields
             state["field_mapping"]     = {k: k for k in fields}
@@ -287,10 +326,8 @@ class ContractOrchestrator:
             doc_hint    = state.get("schema", {}).get("form_name", "")
             norm_fields = agent.normalise_fields(fields, document_hint=doc_hint)
             state["normalised_fields"] = norm_fields
-            logger.info("[SchemaResolve] Fields normalised")
 
             hits = registry.find_similar(norm_fields, top_k=1)
-
             if hits:
                 sim, schema_id, matched_schema = hits[0]
                 logger.info(
@@ -302,21 +339,15 @@ class ContractOrchestrator:
                 state["schema_id"]         = schema_id
                 state["field_mapping"]     = mapping
                 state["normalised_fields"] = mapped_values
-
             else:
-                logger.info("[SchemaResolve] No registry match -- synthesising new schema")
+                logger.info("[SchemaResolve] No match — synthesising new schema")
                 new_schema = agent.synthesise_schema(norm_fields, document_hint=doc_hint)
                 schema_id  = registry.register(new_schema)
                 state["resolved_schema"]   = new_schema
                 state["schema_id"]         = schema_id
                 state["field_mapping"]     = {k: k for k in norm_fields}
                 state.setdefault("warnings", []).append(
-                    f"New schema synthesised and registered: "
-                    f"'{new_schema.get('form_name')}' ({schema_id})"
-                )
-                logger.info(
-                    "[SchemaResolve] Registered new schema '%s' as %s",
-                    new_schema.get("form_name"), schema_id,
+                    f"New schema synthesised: '{new_schema.get('form_name')}' ({schema_id})"
                 )
 
         except Exception as exc:
@@ -330,7 +361,7 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 6 -- Validation + recovery
+    # Node 6 — Validation + recovery
     # ------------------------------------------------------------------
 
     def _validation_node(self, state: ContractState) -> ContractState:
@@ -340,15 +371,12 @@ class ContractOrchestrator:
 
         fields = state.get("normalised_fields", {})
         schema = state.get("resolved_schema", state.get("schema", {}))
-
         if not schema or not fields:
             return state
 
         try:
             recovered, remaining = self.validator.validate_and_recover(
-                fields,
-                schema,
-                state.get("clause_graph", {}),
+                fields, schema, state.get("clause_graph", {}),
                 page_image=state.get("page_image"),
             )
             state["normalised_fields"] = recovered
@@ -364,13 +392,12 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 7 -- Database population
+    # Node 7 — Database population
     # ------------------------------------------------------------------
 
     def _db_populate_node(self, state: ContractState) -> ContractState:
         logger.info("--- Node: db_populate ---")
         if not self.config.enable_db_population:
-            logger.info("[DB] Population disabled")
             return state
 
         try:
@@ -404,7 +431,7 @@ class ContractOrchestrator:
         return state
 
     # ------------------------------------------------------------------
-    # Node 8 -- Finalize output
+    # Node 8 — Finalize
     # ------------------------------------------------------------------
 
     def _finalize_node(self, state: ContractState) -> ContractState:
@@ -414,12 +441,13 @@ class ContractOrchestrator:
         fields = state.get("normalised_fields", {})
 
         output: Dict[str, Any] = {
-            "form":          schema.get("form_name", "Unknown"),
-            "schema_id":     state.get("schema_id", ""),
-            "record_id":     state.get("record_id", ""),
-            "fields":        fields,
-            "field_mapping": state.get("field_mapping", {}),
-            "is_complete":   _check_complete(fields, schema),
+            "form":           schema.get("form_name", "Unknown"),
+            "schema_id":      state.get("schema_id", ""),
+            "record_id":      state.get("record_id", ""),
+            "adapter_group":  state.get("adapter_group", ""),
+            "fields":         fields,
+            "field_mapping":  state.get("field_mapping", {}),
+            "is_complete":    _check_complete(fields, schema),
             "pipeline_metadata": {
                 "start_time":     state.get("pipeline_start"),
                 "end_time":       datetime.now().isoformat(),
@@ -436,8 +464,9 @@ class ContractOrchestrator:
         state["output"]       = output
         state["pipeline_end"] = datetime.now().isoformat()
         logger.info(
-            "[Finalize] Done -- form=%s complete=%s record=%s",
-            output["form"], output["is_complete"], output["record_id"],
+            "[Finalize] form=%s complete=%s record=%s group=%s",
+            output["form"], output["is_complete"],
+            output["record_id"], output["adapter_group"],
         )
         return state
 
@@ -449,8 +478,17 @@ class ContractOrchestrator:
         state["pipeline_start"] = datetime.now().isoformat()
         state.setdefault("errors",   [])
         state.setdefault("warnings", [])
+
+        # Resolve adapter group once before the graph runs
+        state["adapter_group"] = self._resolve_adapter_group(state)
+        logger.info(
+            "[Orchestrator] adapter_group=%s  schema=%s",
+            state["adapter_group"],
+            state.get("schema", {}).get("form_name", "?"),
+        )
+
         logger.info("=" * 55)
-        logger.info("  Agentic ETL Fabric -- starting pipeline")
+        logger.info("  Agentic ETL Fabric — starting pipeline")
         logger.info("=" * 55)
         final = self.graph.invoke(state)
         logger.info("=" * 55)

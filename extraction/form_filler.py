@@ -1,13 +1,20 @@
 """
+extraction/form_filler.py
+==========================
 Form population pipeline:
 
-  1. Text LLM  -- send full document text + schema, get JSON back.
-  2. Vision LLM fallback -- for any field still None after step 1,
-     re-run extraction using a Groq-hosted vision model against
-     the page image.
-  3. Final sentinel -- any field still None after both passes is set
-     to the string "NaN" so callers always receive a complete record.
+  Pass 1: Text LLM  — full document text + schema → JSON
+  Pass 2: Vision LLM fallback  — Groq vision model for null fields
+  Pass 3: Sentinel — remaining null fields set to "NaN"
+
+LoRA adapter routing
+--------------------
+`adapter_group` is passed in from ParallelExtractor (which receives it from
+the orchestrator).  It is stored on the instance and forwarded to any
+LayoutAnalyzer calls made inside this class so the correct adapter is active.
 """
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -22,24 +29,23 @@ _MISSING = "NaN"
 
 
 class FormFiller:
-    """
-    Populates a form using:
-      - Pass 1: text LLM (fast, works on native-text PDFs)
-      - Pass 2: vision LLM via Groq (fallback for fields that came back null)
-    """
 
-    def __init__(self, vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"):
-        self.config = get_config()
-        model_cfg = self.config.model
-
-        self.model_name  = model_cfg.llm_model
-        self.temperature = model_cfg.llm_temperature
-        self.max_tokens  = model_cfg.llm_max_tokens
+    def __init__(
+        self,
+        vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+        adapter_group: str = "group_2",
+    ):
+        self.config       = get_config()
+        model_cfg         = self.config.model
+        self.model_name   = model_cfg.llm_model
+        self.temperature  = model_cfg.llm_temperature
+        self.max_tokens   = model_cfg.llm_max_tokens
         self.vision_model = vision_model
+        self.adapter_group = adapter_group   # forwarded to LayoutAnalyzer
 
         if self.model_name.startswith("ollama/"):
             self.ollama_model = self.model_name.replace("ollama/", "")
-            self._text_call = self._call_ollama
+            self._text_call   = self._call_ollama
         else:
             from transformers import pipeline as hf_pipeline
             self._hf = hf_pipeline(
@@ -55,51 +61,49 @@ class FormFiller:
     # Public API
     # ------------------------------------------------------------------
 
-    def populate(self, clause_graph: Dict[str, str], schema: Dict,
-                 full_text: str = "", page_image=None) -> FormInstance:
+    def populate(
+        self,
+        clause_graph: Dict[str, str],
+        schema: Dict,
+        full_text: str = "",
+        page_image=None,
+    ) -> FormInstance:
         form = FormInstance(schema)
-        logger.info("Populating form: %s", schema.get("form_name", "Unknown"))
+        logger.info("Populating form: %s  (adapter_group=%s)",
+                    schema.get("form_name", "Unknown"), self.adapter_group)
 
         document_text = full_text or " ".join(str(v) for v in clause_graph.values())
 
-        # Pass 1: text LLM
+        # Pass 1 — text LLM
         extracted: Dict[str, Any] = {}
         if document_text.strip():
-            logger.info("Pass 1: text LLM extraction")
-            prompt = self._build_text_prompt(document_text, schema)
-            raw = self._text_call(prompt)
+            prompt    = self._build_text_prompt(document_text, schema)
+            raw       = self._text_call(prompt)
             extracted = self._parse_response(raw, schema)
-            _log_pass_result(extracted, pass_name="text LLM")
+            _log_pass_result(extracted, "text LLM")
         else:
-            logger.warning("Pass 1 skipped -- no document text available")
+            logger.warning("Pass 1 skipped — no document text")
             extracted = {name: None for name in schema["fields"]}
 
-        # Pass 2: vision LLM for null fields
+        # Pass 2 — vision LLM for null fields
         null_fields = [k for k, v in extracted.items() if v is None]
         if null_fields and page_image is not None:
-            logger.info(
-                "Pass 2: vision LLM fallback for %d null field(s): %s",
-                len(null_fields), ", ".join(null_fields),
-            )
+            logger.info("Pass 2: vision fallback for %d field(s)", len(null_fields))
             vision_result = self._vision_extract(page_image, schema, null_fields)
-            for field in null_fields:
-                if vision_result.get(field) is not None:
-                    extracted[field] = vision_result[field]
-                    logger.info("  [vision] filled '%s': %r", field, vision_result[field])
-            _log_pass_result(extracted, pass_name="vision LLM")
+            for f in null_fields:
+                if vision_result.get(f) is not None:
+                    extracted[f] = vision_result[f]
+            _log_pass_result(extracted, "vision LLM")
         elif null_fields and page_image is None:
-            logger.warning(
-                "Pass 2 skipped -- no page_image provided. "
-                "Pass page_image= to FormFiller.populate() to enable vision fallback."
-            )
+            logger.warning("Pass 2 skipped — no page_image provided")
 
-        # Pass 3: sentinel for still-missing fields
+        # Pass 3 — sentinel
         for field_name, value in extracted.items():
             form.fill(field_name, value if value is not None else _MISSING)
 
         null_after = [k for k, v in form.fields.items() if v == _MISSING]
         if null_after:
-            logger.warning("Fields set to '%s' (not found by any pass): %s", _MISSING, null_after)
+            logger.warning("Fields set to '%s': %s", _MISSING, null_after)
 
         return form
 
@@ -109,24 +113,19 @@ class FormFiller:
 
     def _build_text_prompt(self, document_text: str, schema: Dict) -> str:
         field_lines, skeleton = _schema_to_prompt_parts(schema)
-
         system = (
             "You are a precise data-extraction engine. "
-            "Read the document and fill in every field listed below.\n"
+            "Read the document and fill every field listed below.\n"
             "Rules:\n"
-            "- Output ONLY a single valid JSON object -- no prose, no markdown fences.\n"
-            "- If a field value is not present in the document, use null.\n"
-            "- For dates use ISO format YYYY-MM-DD when possible.\n"
-            "- For numbers return only the numeric value.\n"
-            "- For booleans return true or false.\n"
-            "- Never invent values that are not in the document."
+            "- Output ONLY a single valid JSON object — no prose, no markdown.\n"
+            "- Missing values → null. Dates → ISO YYYY-MM-DD. Numbers → numeric only.\n"
+            "- Never invent values."
         )
         user = (
             f"DOCUMENT:\n\"\"\"\n{document_text[:4000]}\n\"\"\"\n\n"
-            f"FIELDS TO EXTRACT:\n{field_lines}\n\n"
-            f"Return a JSON object with exactly these keys:\n{skeleton}"
+            f"FIELDS:\n{field_lines}\n\n"
+            f"Return JSON with exactly these keys:\n{skeleton}"
         )
-
         if "llama" in self.model_name.lower() or self.model_name.startswith("ollama/"):
             return (
                 f"<|start_header_id|>system<|end_header_id|>\n\n{system}"
@@ -138,33 +137,25 @@ class FormFiller:
     def _call_ollama(self, prompt: str) -> str:
         import ollama
         response = ollama.generate(
-            model=self.ollama_model,
-            prompt=prompt,
-            stream=False,
-            options={
-                "temperature": self.temperature,
-                "num_predict": max(self.max_tokens, 512),
-            },
+            model=self.ollama_model, prompt=prompt, stream=False,
+            options={"temperature": self.temperature, "num_predict": max(self.max_tokens, 512)},
         )
         return response["response"]
 
     def _call_hf(self, prompt: str) -> str:
-        outputs = self._hf(prompt)
-        return outputs[0]["generated_text"]
+        return self._hf(prompt)[0]["generated_text"]
 
     # ------------------------------------------------------------------
     # Pass 2 helpers
     # ------------------------------------------------------------------
 
-    def _vision_extract(self, page_image, schema: Dict,
-                        target_fields: list) -> Dict[str, Any]:
+    def _vision_extract(self, page_image, schema: Dict, target_fields: list) -> Dict[str, Any]:
         try:
             from extraction.llama_extractor import LlamaVisionExtractor
-            extractor = LlamaVisionExtractor(model=self.vision_model)
+            extractor  = LlamaVisionExtractor(model=self.vision_model)
             sub_schema = {
                 **schema,
-                "fields": {k: v for k, v in schema["fields"].items()
-                           if k in target_fields},
+                "fields": {k: v for k, v in schema["fields"].items() if k in target_fields},
             }
             return extractor.extract(page_image, sub_schema)
         except Exception as exc:
@@ -183,36 +174,29 @@ class FormFiller:
 
 
 # ---------------------------------------------------------------------------
-# Module-level helpers
+# Module-level helpers  (unchanged)
 # ---------------------------------------------------------------------------
 
 def _schema_to_prompt_parts(schema: Dict):
     lines = []
     for name, meta in schema["fields"].items():
-        ftype    = meta.get("type", "string")
-        desc     = meta.get("description", name)
-        examples = meta.get("examples", [])
-        required = meta.get("required", False)
-        line = f'  "{name}": ({ftype}) {desc}'
-        if required:
+        line = f'  "{name}": ({meta.get("type","string")}) {meta.get("description", name)}'
+        if meta.get("required"):
             line += " [REQUIRED]"
-        if examples:
-            line += f" -- e.g. {', '.join(str(e) for e in examples)}"
+        if meta.get("examples"):
+            line += f" -- e.g. {', '.join(str(e) for e in meta['examples'])}"
         lines.append(line)
-    skeleton = json.dumps({name: None for name in schema["fields"]}, indent=2)
-    return "\n".join(lines), skeleton
+    return "\n".join(lines), json.dumps({n: None for n in schema["fields"]}, indent=2)
 
 
 def _extract_json(text: str) -> Optional[Dict]:
-    text = re.sub(r"```(?:json)?\s*|\s*```", "", text)
+    text  = re.sub(r"```(?:json)?\s*|\s*```", "", text)
     start, end = text.find("{"), text.rfind("}") + 1
     if start == -1 or end <= start:
-        logger.warning("No JSON object found in LLM response")
         return None
     try:
         return json.loads(text[start:end])
-    except json.JSONDecodeError as exc:
-        logger.warning("JSON parse error: %s", exc)
+    except json.JSONDecodeError:
         return None
 
 
@@ -230,21 +214,25 @@ def _coerce(value: Any, expected_type: str) -> Any:
                 return value
             return str(value).lower() in ("true", "yes", "1")
         return str(value).strip() or None
-    except (ValueError, TypeError) as exc:
-        logger.debug("Coercion failed type=%s value=%r: %s", expected_type, value, exc)
+    except (ValueError, TypeError):
         return None
 
 
 def _log_pass_result(extracted: Dict[str, Any], pass_name: str):
     filled = sum(1 for v in extracted.values() if v is not None)
-    total  = len(extracted)
-    logger.info("  [%s] %d/%d fields filled", pass_name, filled, total)
+    logger.info("  [%s] %d/%d fields filled", pass_name, filled, len(extracted))
 
 
 # ---------------------------------------------------------------------------
 # Convenience wrapper
 # ---------------------------------------------------------------------------
 
-def populate_form(clause_graph: Dict[str, str], schema: Dict,
-                  page_image=None) -> FormInstance:
-    return FormFiller().populate(clause_graph, schema, page_image=page_image)
+def populate_form(
+    clause_graph: Dict[str, str],
+    schema: Dict,
+    page_image=None,
+    adapter_group: str = "group_2",
+) -> FormInstance:
+    return FormFiller(adapter_group=adapter_group).populate(
+        clause_graph, schema, page_image=page_image
+    )

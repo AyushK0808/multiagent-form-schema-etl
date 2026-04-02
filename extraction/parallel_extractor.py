@@ -1,31 +1,26 @@
 """
+extraction/parallel_extractor.py
+==================================
 Parallel extraction fabric.
 
-Runs Donut (OCR-free, semantic generalisation) and the text/vision LLM pipeline
-(layout-precise) concurrently via a ThreadPoolExecutor, then packages both
-result sets — with spatial metadata where available — into an ExtractionBundle
-that the downstream ReflexivePolicyLayer can fuse.
+Runs Donut (OCR-free) and the LayoutLM/FormFiller pipeline concurrently
+via a ThreadPoolExecutor, then packages both result sets into an
+ExtractionBundle for the downstream ReflexivePolicyLayer.
 
-Design
-------
-* Donut   → image-only, high semantic coverage, no bbox output
-* LayoutLM → text + bbox, precise localisation, layout-aware
-
-Each extractor returns
-    (fields: Dict[str, Any], confidences: Dict[str, float], metadata: Dict)
-
-The metadata dict contains at minimum:
-    source      : "donut" | "layoutlm"
-    field_coverage : 0.0–1.0  (fraction of non-None fields)
-    spatial_meta   : {field_name: bbox | None}
+LoRA adapter routing
+--------------------
+Both _run_layoutlm and ParallelExtractor accept an `adapter_group` parameter
+("group_1" | "group_2" | "group_3").  The group is resolved upstream by the
+orchestrator and passed down here so the correct LoRA adapter is active
+when FormFiller calls the LayoutLMv3 token classifier.
 """
 from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from PIL import Image
 
@@ -33,16 +28,15 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Result container
+# Result containers  (unchanged)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ExtractorResult:
-    """Output of a single extractor."""
-    source:        str                     # "donut" | "layoutlm"
-    fields:        Dict[str, Any]          # field_name → value | None
-    confidences:   Dict[str, float]        # field_name → 0.0–1.0
-    spatial_meta:  Dict[str, Any]          # field_name → {"bbox": ..., "page": ...}
+    source:        str
+    fields:        Dict[str, Any]
+    confidences:   Dict[str, float]
+    spatial_meta:  Dict[str, Any]
     elapsed_s:     float = 0.0
     error:         Optional[str] = None
 
@@ -50,8 +44,7 @@ class ExtractorResult:
     def field_coverage(self) -> float:
         if not self.fields:
             return 0.0
-        filled = sum(1 for v in self.fields.values() if v is not None)
-        return filled / len(self.fields)
+        return sum(1 for v in self.fields.values() if v is not None) / len(self.fields)
 
     @property
     def mean_confidence(self) -> float:
@@ -62,17 +55,14 @@ class ExtractorResult:
 
 @dataclass
 class ExtractionBundle:
-    """Holds both extractor results for downstream fusion."""
     donut:    Optional[ExtractorResult] = None
     layoutlm: Optional[ExtractorResult] = None
 
     @property
     def all_field_names(self):
         names = set()
-        if self.donut:
-            names |= set(self.donut.fields)
-        if self.layoutlm:
-            names |= set(self.layoutlm.fields)
+        if self.donut:    names |= set(self.donut.fields)
+        if self.layoutlm: names |= set(self.layoutlm.fields)
         return names
 
     def summary(self) -> str:
@@ -88,7 +78,7 @@ class ExtractionBundle:
 
 
 # ---------------------------------------------------------------------------
-# Donut runner (wraps extraction.donut_extractor)
+# Donut runner  (unchanged — Donut is OCR-free, no adapter routing needed)
 # ---------------------------------------------------------------------------
 
 def _run_donut(
@@ -110,7 +100,7 @@ def _run_donut(
             elapsed_s=time.perf_counter() - t0,
         )
     except Exception as exc:
-        logger.error(f"[Parallel] Donut runner failed: {exc}")
+        logger.error("[Parallel] Donut runner failed: %s", exc)
         field_names = list(schema.get("fields", {}).keys())
         return ExtractorResult(
             source="donut",
@@ -123,7 +113,7 @@ def _run_donut(
 
 
 # ---------------------------------------------------------------------------
-# LayoutLM / FormFiller runner
+# LayoutLM / FormFiller runner — LoRA adapter group aware
 # ---------------------------------------------------------------------------
 
 def _run_layoutlm(
@@ -132,11 +122,19 @@ def _run_layoutlm(
     schema: Dict,
     clause_graph: Dict,
     full_text: str,
+    adapter_group: str = "group_2",
 ) -> ExtractorResult:
+    """
+    Run FormFiller with the LoRA adapter group that matches this document type.
+
+    The `adapter_group` is forwarded to LayoutAnalyzer inside FormFiller via
+    the `group_name` kwarg so the correct LoRA adapter is active during any
+    LayoutLM inference calls within the populate() pipeline.
+    """
     t0 = time.perf_counter()
     try:
         from extraction.form_filler import FormFiller
-        filler = FormFiller()
+        filler = FormFiller(adapter_group=adapter_group)
         form   = filler.populate(
             clause_graph,
             schema,
@@ -145,18 +143,13 @@ def _run_layoutlm(
         )
         fields = form.fields
 
-        # Build per-field confidence from form metadata
         conf_scores: Dict[str, float] = {}
         for fname in fields:
-            # FormFiller stores 1.0 for text-LLM fills; we keep that or default 0.6
             raw_conf = form.metadata.get("confidence_scores", {}).get(fname, 0.6)
-            # Penalise NaN sentinel
             conf_scores[fname] = 0.0 if fields[fname] == "NaN" else float(raw_conf)
-            # Normalise NaN sentinel back to None for downstream
             if fields[fname] == "NaN":
                 fields[fname] = None
 
-        # Spatial metadata from blocks
         spatial: Dict[str, Any] = {}
         for b in blocks:
             for fname in fields:
@@ -173,7 +166,7 @@ def _run_layoutlm(
             elapsed_s=time.perf_counter() - t0,
         )
     except Exception as exc:
-        logger.error(f"[Parallel] LayoutLM runner failed: {exc}")
+        logger.error("[Parallel] LayoutLM runner failed: %s", exc)
         field_names = list(schema.get("fields", {}).keys())
         return ExtractorResult(
             source="layoutlm",
@@ -196,16 +189,20 @@ class ParallelExtractor:
     Parameters
     ----------
     donut_model_id : override the default Donut checkpoint
-    max_workers    : thread pool size (default 2, one per extractor)
+    max_workers    : thread pool size (default 2)
+    adapter_group  : LoRA adapter group to activate for LayoutLM
+                     ("group_1" | "group_2" | "group_3")
     """
 
     def __init__(
         self,
         donut_model_id: Optional[str] = None,
         max_workers: int = 2,
+        adapter_group: str = "group_2",
     ):
         self.donut_model_id = donut_model_id
         self.max_workers    = max_workers
+        self.adapter_group  = adapter_group
 
     def extract(
         self,
@@ -215,18 +212,7 @@ class ParallelExtractor:
         clause_graph: Dict,
         full_text: str = "",
     ) -> ExtractionBundle:
-        """
-        Run both extractors concurrently.
-
-        Parameters
-        ----------
-        blocks       : ingested DocumentBlock dicts (from ingestion.ingest_pdf)
-        page_image   : PIL Image of document page
-        schema       : field schema dict
-        clause_graph : layout-derived clause mapping
-        full_text    : concatenated document text
-        """
-        bundle: ExtractionBundle = ExtractionBundle()
+        bundle = ExtractionBundle()
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures: Dict[str, Future] = {
@@ -234,19 +220,21 @@ class ParallelExtractor:
                     _run_donut, page_image, schema, self.donut_model_id
                 ),
                 "layoutlm": pool.submit(
-                    _run_layoutlm, blocks, page_image, schema, clause_graph, full_text
+                    _run_layoutlm,
+                    blocks, page_image, schema, clause_graph, full_text,
+                    self.adapter_group,      # ← adapter group forwarded
                 ),
             }
 
             for name, fut in futures.items():
                 try:
-                    result = fut.result(timeout=300)  # 5 min safety cap
+                    result = fut.result(timeout=300)
                     if name == "donut":
                         bundle.donut = result
                     else:
                         bundle.layoutlm = result
                 except Exception as exc:
-                    logger.error(f"[Parallel] {name} future raised: {exc}")
+                    logger.error("[Parallel] %s future raised: %s", name, exc)
 
-        logger.info(f"[Parallel] {bundle.summary()}")
+        logger.info("[Parallel] %s", bundle.summary())
         return bundle

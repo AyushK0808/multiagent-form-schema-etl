@@ -62,3 +62,4 @@ flake8
 # ── Report generation ─────────────────────────────────────────────────────────
 reportlab
 albumentations
+peft

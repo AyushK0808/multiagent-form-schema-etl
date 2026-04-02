@@ -4,7 +4,7 @@ Configuration management for the agentic ETL fabric.
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Dict, Optional, List
 
 try:
     from dotenv import load_dotenv
@@ -27,7 +27,11 @@ class ModelConfig:
     schema_recognition_layout_model: str = "models/schema_recognition/layoutlmv3"
     schema_recognition_layout_fallback_model: str = "microsoft/layoutlmv3-base"
 
-    # Text LLM backend  (Hugging Face model ID or other text-generation backend)
+    # LoRA adapter root  — each group lives at <adapter_root>/group_{1,2,3}/layoutlmv3/
+    # Set to "" to disable adapter routing and fall back to legacy checkpoint.
+    adapter_root: str = "models/adapters"
+
+    # Text LLM backend
     llm_model:       str   = "google/flan-t5-base"
     llm_temperature: float = 0.1
     llm_max_tokens:  int   = 256
@@ -37,10 +41,12 @@ class ModelConfig:
     schema_recognition_donut_model: str = "models/schema_recognition/donut"
     schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base-finetuned-docvqa"
 
-    # Device for local models
-    device: str = "auto"   # "auto" | "cpu" | "cuda"
+    # LoRA Donut adapter root — each group at <donut_adapter_root>/group_{1,2,3}/donut/
+    donut_adapter_root: str = "models/adapters"
 
-    # Legacy local vision preference list retained for backward compatibility.
+    # Device for local models
+    device: str = "auto"
+
     vision_model_preference: List[str] = field(default_factory=lambda: [
         "moondream",
         "llava:7b",
@@ -62,12 +68,10 @@ class GroqConfig:
 @dataclass
 class ProcessingConfig:
     """Configuration for document processing."""
-    ocr_threshold:        int   = 50    # min text chars before OCR kicks in
-    max_page_size:        int   = 5000  # max image dimension in pixels
-    confidence_threshold: float = 0.70  # min field confidence for acceptance
-    # Minimum cosine similarity for schema registry hit
+    ocr_threshold:        int   = 50
+    max_page_size:        int   = 5000
+    confidence_threshold: float = 0.70
     schema_sim_threshold: float = 0.70
-    # Run Donut + LayoutLM in parallel (False = LayoutLM only, faster)
     enable_parallel_extraction: bool = True
 
 
@@ -82,6 +86,9 @@ class PathConfig:
     test_dir:        Path = field(default_factory=lambda: Path(__file__).parent.parent / "data" / "test")
     registry_dir:    Path = field(default_factory=lambda: Path(__file__).parent.parent / "data" / "schema_registry")
     db_path:         Path = field(default_factory=lambda: Path(__file__).parent.parent / "data" / "etl.db")
+
+    # LoRA adapter checkpoints root (written by train_lora.py)
+    adapter_root:    Path = field(default_factory=lambda: Path(__file__).parent.parent / "models" / "adapters")
 
     def __post_init__(self):
         for p in [self.raw_dir, self.output_dir, self.schema_dir,
@@ -100,10 +107,12 @@ class Config:
     # Feature flags
     enable_validation:           bool = True
     enable_recovery:             bool = True
-    enable_schema_agent:         bool = True   # Groq schema resolution
-    enable_schema_recognition:   bool = True   # fine-tuned LayoutLMv3 / Donut schema classifier
-    enable_db_population:        bool = True   # write to SQLite
-    enable_parallel_extraction:  bool = True   # Donut + LayoutLM in parallel
+    enable_schema_agent:         bool = True
+    enable_schema_recognition:   bool = True
+    enable_db_population:        bool = True
+    enable_parallel_extraction:  bool = True
+    # When True, LayoutAnalyzer uses LoRA adapters if they exist at paths.adapter_root
+    enable_lora_adapters:        bool = True
     verbose:                     bool = False
 
 
