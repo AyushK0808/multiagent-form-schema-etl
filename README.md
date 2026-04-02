@@ -45,7 +45,7 @@ This system implements an end-to-end pipeline for extracting structured informat
 ## Key Features
 
 ### Multi-Modal Parallel Extraction
-- **Donut** (`naver-clova-ix/donut-base-finetuned-docvqa`) — OCR-free extraction directly from pixel data via DocVQA-style question answering
+- **Donut** (`naver-clova-ix/donut-base`) — OCR-free extraction directly from pixel data via DocVQA-style question answering
 - **LayoutLMv3** — Spatially-anchored token classification with bounding-box-aware preprocessing
 - Both extractors run concurrently via `ThreadPoolExecutor`; results are fused by a `ReflexivePolicyLayer`
 
@@ -270,7 +270,7 @@ Configuration lives in `config/config.py` as a hierarchy of frozen dataclasses, 
 |---|---|---|---|
 | `model` | `layout_model` | `models/layoutlmv3-nda/checkpoint_best` | Legacy layout checkpoint path |
 | `model` | `adapter_root` | `models/adapters` | LoRA adapter root directory |
-| `model` | `donut_model` | `naver-clova-ix/donut-base-finetuned-docvqa` | Donut checkpoint |
+| `model` | `donut_model` | `naver-clova-ix/donut-base` | Donut checkpoint |
 | `model` | `llm_model` | `google/flan-t5-base` | Text LLM for pass 1 extraction |
 | `groq` | `vision_model` | `meta-llama/llama-4-scout-17b-16e-instruct` | Vision model for pass 2 |
 | `groq` | `synthesis_model` | `llama-3.3-70b-versatile` | Model for schema synthesis |
@@ -510,4 +510,4 @@ Train adapters first with `python finetune/train_lora.py`. Until then the pipeli
 
 ## License
 
-MIT License — Copyright (c) 2024
+MIT License — Copyright (c) 2026

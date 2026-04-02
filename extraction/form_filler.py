@@ -20,7 +20,8 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
-from transformers import AutoConfig
+import torch
+from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
 from utils.form import FormInstance
 from config.config import get_config
 
@@ -29,14 +30,35 @@ logger = logging.getLogger(__name__)
 _MISSING = "NaN"
 
 
-def _hf_pipeline_task(model_name: str) -> str:
-    """Choose the matching HF pipeline task for the configured model."""
+def _is_encoder_decoder_model(model_name: str) -> bool:
+    """Return True for seq2seq models such as FLAN-T5."""
     try:
         model_config = AutoConfig.from_pretrained(model_name)
-        return "text2text-generation" if getattr(model_config, "is_encoder_decoder", False) else "text-generation"
+        return bool(getattr(model_config, "is_encoder_decoder", False))
     except Exception as exc:
-        logger.warning("Could not inspect model type for %s: %s; using text-generation", model_name, exc)
-        return "text-generation"
+        logger.warning("Could not inspect model type for %s: %s; assuming causal LM", model_name, exc)
+        return False
+
+
+class _Seq2SeqGenerator:
+    """Minimal text generation wrapper for encoder-decoder models."""
+
+    def __init__(self, model_name: str, max_new_tokens: int, device_map: str = "auto"):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, device_map=device_map)
+        self.max_new_tokens = max_new_tokens
+
+    def __call__(self, prompt: str):
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True)
+        model_device = next(self.model.parameters()).device
+        inputs = {k: v.to(model_device) for k, v in inputs.items()}
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+            )
+        generated_text = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        return [{"generated_text": generated_text}]
 
 
 class FormFiller:
@@ -59,14 +81,20 @@ class FormFiller:
             self._text_call   = self._call_ollama
         else:
             from transformers import pipeline as hf_pipeline
-            task = _hf_pipeline_task(self.model_name)
-            self._hf = hf_pipeline(
-                task,
-                model=self.model_name,
-                temperature=self.temperature,
-                max_new_tokens=self.max_tokens,
-                device_map=model_cfg.device,
-            )
+            if _is_encoder_decoder_model(self.model_name):
+                self._hf = _Seq2SeqGenerator(
+                    self.model_name,
+                    max_new_tokens=self.max_tokens,
+                    device_map=model_cfg.device,
+                )
+            else:
+                self._hf = hf_pipeline(
+                    "text-generation",
+                    model=self.model_name,
+                    temperature=self.temperature,
+                    max_new_tokens=self.max_tokens,
+                    device_map=model_cfg.device,
+                )
             self._text_call = self._call_hf
 
     # ------------------------------------------------------------------

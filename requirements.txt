@@ -63,3 +63,4 @@ flake8
 reportlab
 albumentations
 peft
+streamlit
