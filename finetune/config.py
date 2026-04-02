@@ -72,11 +72,11 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
     trust_remote_code=True,        # ← fix: uses legacy dataset script
 ),
     # ── Critical adds ────────────────────────────────────────────────────
-    "PUBLAYNET": DatasetSpec(
-        name="PUBLAYNET", repo_id="jordanparker6/publaynet",
-        schema_name="publaynet_layout", description="Academic paper layout",
-        annotation_type="segment", curriculum_order=2,
-    ),
+    # "PUBLAYNET": DatasetSpec(
+    #     name="PUBLAYNET", repo_id="jordanparker6/publaynet",
+    #     schema_name="publaynet_layout", description="Academic paper layout",
+    #     annotation_type="segment", curriculum_order=2,
+    # ),
     "DOCLAYNET": DatasetSpec(
     name="DOCLAYNET", repo_id="docling-project/DocLayNet-v1.2",
     schema_name="doclaynet_layout", description="Multi-domain document layout",
@@ -110,7 +110,7 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
         annotation_type="qa", curriculum_order=5,
     ),
     "SYNTHDOG_EN": DatasetSpec(
-        name="SYNTHDOG_EN", repo_id="naver-clova-ix/synthdog-en",
+        name="SYNTHDOG_EN", repo_id="nnethercott/synthdog-en-detection",
         schema_name="synthdog_ocr", description="Synthetic OCR-free reading",
         annotation_type="qa", curriculum_order=1,
     ),

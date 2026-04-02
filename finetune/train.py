@@ -66,6 +66,28 @@ def parse_args() -> argparse.Namespace:
         "--output-root", type=Path,
         default=Path("models") / "schema_recognition",
     )
+    parser.add_argument(
+        "--normalized-cache-root",
+        type=Path,
+        default=Path("data") / "intermediate" / "finetune_normalized",
+        help="Directory for persisted normalized dataset splits reused across runs",
+    )
+    parser.add_argument(
+        "--refresh-normalized-cache",
+        action="store_true",
+        help="Rebuild persisted normalized dataset splits instead of reusing them",
+    )
+    parser.add_argument(
+        "--augmented-cache-root",
+        type=Path,
+        default=Path("data") / "intermediate" / "finetune_augmented",
+        help="Directory for persisted augmented training splits reused across runs",
+    )
+    parser.add_argument(
+        "--refresh-augmented-cache",
+        action="store_true",
+        help="Rebuild persisted augmented training splits instead of reusing them",
+    )
     parser.add_argument("--epochs",        type=int,   default=10)
     parser.add_argument("--batch-size",    type=int,   default=2)
     parser.add_argument("--learning-rate", type=float, default=3e-5)
@@ -97,6 +119,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     args.output_root.mkdir(parents=True, exist_ok=True)
+    args.normalized_cache_root.mkdir(parents=True, exist_ok=True)
+    args.augmented_cache_root.mkdir(parents=True, exist_ok=True)
 
     dataset_names = list(DATASET_SPECS.keys()) if args.all_datasets else args.datasets
     augment       = not args.no_augment
@@ -117,6 +141,10 @@ def main() -> None:
         dataset_names=dataset_names,
         max_train_samples=args.max_train_samples_per_dataset,
         max_val_samples=args.max_val_samples_per_dataset,
+        normalized_cache_root=args.normalized_cache_root,
+        refresh_normalized_cache=args.refresh_normalized_cache,
+        augmented_cache_root=args.augmented_cache_root,
+        refresh_augmented_cache=args.refresh_augmented_cache,
         augment_train=augment,
         curriculum=args.curriculum,
     )
@@ -131,6 +159,10 @@ def main() -> None:
                 "validation_examples":  len(val_dataset),
                 "augmentation_enabled": augment,
                 "curriculum_enabled":   args.curriculum,
+                "normalized_cache_root": str(args.normalized_cache_root.resolve()),
+                "normalized_cache_refreshed": args.refresh_normalized_cache,
+                "augmented_cache_root": str(args.augmented_cache_root.resolve()),
+                "augmented_cache_refreshed": args.refresh_augmented_cache,
             },
             indent=2,
         ),

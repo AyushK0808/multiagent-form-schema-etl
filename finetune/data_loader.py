@@ -3,6 +3,7 @@ finetune/data_loader.py
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import asdict
@@ -61,11 +62,67 @@ def _load_single_dataset(
     spec: DatasetSpec,
     max_train_samples: Optional[int],
     max_val_samples: Optional[int],
+    normalized_cache_root: Optional[Path] = None,
+    refresh_normalized_cache: bool = False,
+    augmented_cache_root: Optional[Path] = None,
+    refresh_augmented_cache: bool = False,
     augment_train: bool = True,
 ) -> Tuple[Optional[object], Optional[object]]:
-    from datasets import load_dataset
+    from datasets import load_dataset, load_from_disk
 
     logger.info("[DataLoader] Loading %s from %s", spec.name, spec.repo_id)
+
+    cache_base = None
+    train_cache_dir = None
+    val_cache_dir = None
+    augmented_cache_base = None
+    augmented_train_cache_dir = None
+    if normalized_cache_root is not None:
+        cache_base = normalized_cache_root / spec.name.lower()
+        train_cache_dir = cache_base / "train"
+        val_cache_dir = cache_base / "validation"
+    if augmented_cache_root is not None:
+        augmented_cache_base = augmented_cache_root / spec.name.lower()
+        augmented_train_cache_dir = augmented_cache_base / "train"
+    if (
+        augment_train
+        and augmented_train_cache_dir is not None
+        and not refresh_augmented_cache
+        and augmented_train_cache_dir.exists()
+        and val_cache_dir is not None
+        and val_cache_dir.exists()
+    ):
+        logger.info("[DataLoader] Reusing augmented cache for %s", spec.name)
+        train_ds = load_from_disk(str(augmented_train_cache_dir))
+        val_ds = load_from_disk(str(val_cache_dir))
+        if max_train_samples:
+            train_ds = train_ds.select(range(min(max_train_samples, len(train_ds))))
+        if max_val_samples:
+            val_ds = val_ds.select(range(min(max_val_samples, len(val_ds))))
+        return train_ds, val_ds
+    if (
+        not refresh_normalized_cache
+        and train_cache_dir is not None
+        and val_cache_dir is not None
+        and train_cache_dir.exists()
+        and val_cache_dir.exists()
+    ):
+        logger.info("[DataLoader] Reusing normalized cache for %s", spec.name)
+        train_ds = load_from_disk(str(train_cache_dir))
+        val_ds = load_from_disk(str(val_cache_dir))
+        if augment_train:
+            train_ds = _maybe_augment_and_cache(
+                train_ds=train_ds,
+                spec=spec,
+                augmented_cache_base=augmented_cache_base,
+                augmented_train_cache_dir=augmented_train_cache_dir,
+                refresh_augmented_cache=refresh_augmented_cache,
+            )
+        if max_train_samples:
+            train_ds = train_ds.select(range(min(max_train_samples, len(train_ds))))
+        if max_val_samples:
+            val_ds = val_ds.select(range(min(max_val_samples, len(val_ds))))
+        return train_ds, val_ds
 
     load_kwargs: Dict = {}
     if spec.config_name:
@@ -96,7 +153,7 @@ def _load_single_dataset(
 
     norm_fn = NORMALIZERS.get(spec.name)
 
-    def normalize(example: Dict, is_train: bool = False) -> Dict:
+    def normalize(example: Dict) -> Dict:
         try:
             result = norm_fn(example) if norm_fn else normalize_generic(example, spec)
         except Exception as exc:
@@ -107,29 +164,101 @@ def _load_single_dataset(
                 "label_text":   spec.schema_name or spec.name.lower(),
                 "dataset_name": spec.name,
             }
-        if is_train and augment_train:
-            result["image"] = augment_image(result["image"])
         return result
 
     train_ds = ds["train"]
     val_ds   = ds["validation"]
 
-    if max_train_samples:
-        train_ds = train_ds.select(range(min(max_train_samples, len(train_ds))))
-    if max_val_samples:
-        val_ds = val_ds.select(range(min(max_val_samples, len(val_ds))))
-
     train_ds = train_ds.map(
-        lambda ex: normalize(ex, is_train=True),
+        normalize,
         remove_columns=train_ds.column_names,
         desc=f"Normalize {spec.name} train",
     )
     val_ds = val_ds.map(
-        lambda ex: normalize(ex, is_train=False),
+        normalize,
         remove_columns=val_ds.column_names,
         desc=f"Normalize {spec.name} val",
     )
+
+    if cache_base is not None:
+        cache_base.mkdir(parents=True, exist_ok=True)
+        logger.info("[DataLoader] Saving normalized cache for %s to %s", spec.name, cache_base)
+        train_ds.save_to_disk(str(train_cache_dir))
+        val_ds.save_to_disk(str(val_cache_dir))
+        (cache_base / "manifest.json").write_text(
+            json.dumps(
+                {
+                    **asdict(spec),
+                    "train_examples": len(train_ds),
+                    "validation_examples": len(val_ds),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    if augment_train:
+        train_ds = _maybe_augment_and_cache(
+            train_ds=train_ds,
+            spec=spec,
+            augmented_cache_base=augmented_cache_base,
+            augmented_train_cache_dir=augmented_train_cache_dir,
+            refresh_augmented_cache=refresh_augmented_cache,
+        )
+    if max_train_samples:
+        train_ds = train_ds.select(range(min(max_train_samples, len(train_ds))))
+    if max_val_samples:
+        val_ds = val_ds.select(range(min(max_val_samples, len(val_ds))))
     return train_ds, val_ds
+
+
+def _augment_normalized_example(example: Dict) -> Dict:
+    example["image"] = augment_image(example["image"])
+    return example
+
+
+def _maybe_augment_and_cache(
+    train_ds,
+    spec: DatasetSpec,
+    augmented_cache_base: Optional[Path],
+    augmented_train_cache_dir: Optional[Path],
+    refresh_augmented_cache: bool,
+):
+    from datasets import load_from_disk
+
+    if (
+        augmented_train_cache_dir is not None
+        and not refresh_augmented_cache
+        and augmented_train_cache_dir.exists()
+    ):
+        logger.info("[DataLoader] Reusing augmented cache for %s", spec.name)
+        return load_from_disk(str(augmented_train_cache_dir))
+
+    augmented_train_ds = train_ds.map(
+        _augment_normalized_example,
+        batched=False,
+        desc=f"Augment {spec.name} train",
+    )
+    if augmented_cache_base is not None and augmented_train_cache_dir is not None:
+        augmented_cache_base.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "[DataLoader] Saving augmented cache for %s to %s",
+            spec.name,
+            augmented_cache_base,
+        )
+        augmented_train_ds.save_to_disk(str(augmented_train_cache_dir))
+        (augmented_cache_base / "manifest.json").write_text(
+            json.dumps(
+                {
+                    **asdict(spec),
+                    "train_examples": len(augmented_train_ds),
+                    "source": "normalized_train_split",
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    return augmented_train_ds
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +269,10 @@ def build_combined_dataset(
     dataset_names: List[str],
     max_train_samples: Optional[int],
     max_val_samples: Optional[int],
+    normalized_cache_root: Optional[Path] = None,
+    refresh_normalized_cache: bool = False,
+    augmented_cache_root: Optional[Path] = None,
+    refresh_augmented_cache: bool = False,
     augment_train: bool = True,
     curriculum: bool = False,
 ):
@@ -152,7 +285,14 @@ def build_combined_dataset(
     train_parts, val_parts, manifest = [], [], []
     for spec in specs:
         train_ds, val_ds = _load_single_dataset(
-            spec, max_train_samples, max_val_samples, augment_train=augment_train
+            spec,
+            max_train_samples,
+            max_val_samples,
+            normalized_cache_root=normalized_cache_root,
+            refresh_normalized_cache=refresh_normalized_cache,
+            augmented_cache_root=augmented_cache_root,
+            refresh_augmented_cache=refresh_augmented_cache,
+            augment_train=augment_train,
         )
         if train_ds is None:
             continue
