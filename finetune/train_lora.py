@@ -67,12 +67,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--normalized-cache-root", type=Path,
-        default=Path("data") / "intermediate" / "lora_normalized",
+        default=Path("data") / "intermediate" / "finetune_normalized",
     )
     parser.add_argument("--refresh-normalized-cache", action="store_true")
     parser.add_argument(
         "--augmented-cache-root", type=Path,
-        default=Path("data") / "intermediate" / "lora_augmented",
+        default=Path("data") / "intermediate" / "finetune_augmented",
     )
     parser.add_argument("--refresh-augmented-cache", action="store_true")
     parser.add_argument("--epochs",        type=int,   default=10)

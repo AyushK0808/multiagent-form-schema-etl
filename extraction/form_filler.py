@@ -20,12 +20,23 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
+from transformers import AutoConfig
 from utils.form import FormInstance
 from config.config import get_config
 
 logger = logging.getLogger(__name__)
 
 _MISSING = "NaN"
+
+
+def _hf_pipeline_task(model_name: str) -> str:
+    """Choose the matching HF pipeline task for the configured model."""
+    try:
+        model_config = AutoConfig.from_pretrained(model_name)
+        return "text2text-generation" if getattr(model_config, "is_encoder_decoder", False) else "text-generation"
+    except Exception as exc:
+        logger.warning("Could not inspect model type for %s: %s; using text-generation", model_name, exc)
+        return "text-generation"
 
 
 class FormFiller:
@@ -48,8 +59,9 @@ class FormFiller:
             self._text_call   = self._call_ollama
         else:
             from transformers import pipeline as hf_pipeline
+            task = _hf_pipeline_task(self.model_name)
             self._hf = hf_pipeline(
-                "text-generation",
+                task,
                 model=self.model_name,
                 temperature=self.temperature,
                 max_new_tokens=self.max_tokens,
