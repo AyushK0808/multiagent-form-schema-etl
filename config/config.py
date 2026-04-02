@@ -37,9 +37,9 @@ class ModelConfig:
     llm_max_tokens:  int   = 256
 
     # Donut OCR-free extractor
-    donut_model: str = "naver-clova-ix/donut-base-finetuned-docvqa"
+    donut_model: str = "naver-clova-ix/donut-base"
     schema_recognition_donut_model: str = "models/schema_recognition/donut"
-    schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base-finetuned-docvqa"
+    schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base"
 
     # LoRA Donut adapter root — each group at <donut_adapter_root>/group_{1,2,3}/donut/
     donut_adapter_root: str = "models/adapters"

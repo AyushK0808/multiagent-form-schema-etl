@@ -6,8 +6,8 @@ the raw pixel image, and a BART-style decoder generates structured text.  We
 run it in DocVQA mode — one question per schema field — so no fine-tuning is
 required for new document types.
 
-Model: naver-clova-ix/donut-base-finetuned-docvqa  (~400 MB)
-Pull once with:  huggingface-cli download naver-clova-ix/donut-base-finetuned-docvqa
+Model: naver-clova-ix/donut-base  (~400 MB)
+Pull once with:  huggingface-cli download naver-clova-ix/donut-base
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-_DONUT_MODEL_ID = "naver-clova-ix/donut-base-finetuned-docvqa"
+_DONUT_MODEL_ID = "naver-clova-ix/donut-base"
 _TASK_PROMPT    = "<s_docvqa><s_question>{question}</s_question><s_answer>"
 
 
