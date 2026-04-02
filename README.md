@@ -1,6 +1,6 @@
 # Multi-Agent Form Schema ETL Pipeline
 
-A sophisticated, layout-aware, schema-guided approach to structured information extraction from documents using multi-modal transformers, vision-based Large Language Models, and intelligent orchestration. This system demonstrates a production-ready pipeline for extracting structured data from complex documents like contracts, NDAs, and forms.
+A layout-aware, schema-guided document extraction system using multi-modal transformers, LoRA-adapted vision-language models, and a reflexive multi-agent orchestration fabric. Designed for production-grade extraction from complex documents such as contracts, NDAs, invoices, and forms.
 
 ---
 
@@ -14,486 +14,500 @@ A sophisticated, layout-aware, schema-guided approach to structured information 
 6. [Configuration](#configuration)
 7. [Usage](#usage)
 8. [Project Structure](#project-structure)
-9. [Data Flow](#data-flow)
-10. [API Documentation](#api-documentation)
-11. [Examples](#examples)
-12. [Supported Models](#supported-models)
-13. [Development](#development)
-14. [License](#license)
+9. [Fine-tuning](#fine-tuning)
+10. [Supported Models](#supported-models)
+11. [Development](#development)
+12. [License](#license)
 
 ---
 
 ## Overview
 
-This project implements an end-to-end pipeline for extracting structured information from unstructured documents. Unlike naive LLM-based extraction that processes documents in their entirety, this system employs a **multi-stage, research-backed approach**:
+This system implements an end-to-end pipeline for extracting structured information from unstructured documents. Rather than naive full-document LLM processing, it uses a **multi-stage, research-backed approach**:
 
-1. **Document Ingestion**: Extract text and metadata from PDFs with OCR fallback
-2. **Layout Analysis**: Perform token-level structural classification using LayoutLMv3
-3. **Clause Graph Construction**: Build a hierarchical, deterministic representation of document structure
-4. **Schema-Guided Extraction**: Use LLMs to extract specific fields within constrained contexts
-5. **Validation & Recovery**: Apply rule-based validation and recover from extraction failures
-6. **Orchestration**: Coordinate all stages via a stateful LangGraph pipeline
+1. **Document Ingestion** — Extract text and bounding boxes from PDFs with OCR fallback via Tesseract
+2. **Layout Analysis** — Token-level structural classification using LayoutLMv3, with LoRA adapter routing per document group
+3. **Parallel Extraction** — Donut (OCR-free, pixel-level) and LayoutLM/FormFiller pipelines run concurrently
+4. **Reflexive Policy Fusion** — Confidence-weighted field-level fusion with consistency validation and jargon normalisation
+5. **Groq Repair Pass** — LLM-assisted field repair and normalisation before schema resolution
+6. **Schema Resolution** — Groq agent matches, maps, or synthesises schemas via a semantic embedding registry
+7. **Validation & Recovery** — Rule-based validation with default-value and retry recovery strategies
+8. **Database Population** — Schema-driven SQLite storage with dynamic table creation
 
-**Research Benefits**:
-- ✅ Reduces LLM hallucination through context grounding
-- ✅ Improves field extraction accuracy via structural awareness
-- ✅ Provides reproducibility through deterministic processing stages
-- ✅ Enables cost-efficient extraction via micro-decoding (field-level) instead of full-document processing
+**Research benefits**:
+- Reduces LLM hallucination by grounding extraction in layout-classified clause contexts
+- Improves accuracy through parallel extraction and policy-layer fusion
+- Enables cost-efficient micro-decoding (field-level) instead of full-document prompting
+- Supports reproducibility through deterministic preprocessing and curriculum-ordered fine-tuning
 
 ---
 
 ## Key Features
 
-### Multi-Modal Processing
-- **Text Extraction**: Native PDF text with fallback to Tesseract OCR
-- **Layout Awareness**: Spatial features via LayoutLMv3 token classification
-- **Vision Capabilities**: Optional Llama 3.2 vision model for image-based extraction
+### Multi-Modal Parallel Extraction
+- **Donut** (`naver-clova-ix/donut-base-finetuned-docvqa`) — OCR-free extraction directly from pixel data via DocVQA-style question answering
+- **LayoutLMv3** — Spatially-anchored token classification with bounding-box-aware preprocessing
+- Both extractors run concurrently via `ThreadPoolExecutor`; results are fused by a `ReflexivePolicyLayer`
+
+### LoRA Adapter Architecture
+- Three adapter groups trained on distinct dataset curricula (layout-primitive, structural, reasoning-heavy)
+- Adapters are hot-swapped at inference via `AdapterRouter` using PEFT's `set_adapter` / `load_adapter` APIs
+- Full model checkpoints (~500 MB) replaced by per-group LoRA adapters (~8–15 MB each)
+- Group routing is resolved once per document from the recognised schema name via `group_for_schema()`
+
+### Reflexive Policy Fusion
+- Per-field source selection based on confidence scores, field coverage, and spatial preference
+- Spatially-anchored fields (dates, amounts, signatures) prefer LayoutLM; semantic fields prefer Donut
+- Cross-field consistency rules: date ordering, party name uniqueness, required field presence
+- Jargon normalisation strips legalese patterns (`as defined herein`, `(the "Company")`) post-fusion
 
 ### Schema Management
-- **Flexible Field Definitions**: Support for multiple data types (date, string, number, boolean)
-- **Type-Specific Extraction**: Regex patterns, keyword matching, and LLM-based extraction per field
-- **Validation Rules**: Built-in validators for dates, required fields, and custom patterns
-- **Easy Extensibility**: Simple JSON-based schema system for new document types
+- **Schema registry** — Sentence-transformer embeddings (MiniLM-L6-v2) over field descriptions enable semantic similarity search
+- **Schema agent** — Groq-hosted LLM normalises, maps, and synthesises schemas; falls back to rule-based construction
+- **SQLite backend** — Unified storage for both schema definitions and extracted records, with `UPSERT` semantics and dynamic `ALTER TABLE` for new fields
+- Schemas are registered automatically when no close match exists in the registry
 
-### Intelligent Extraction
-- **Clause Graph**: Deterministic document structure representation preserving hierarchy
-- **Schema-Guided LLM**: Micro-decoding approach extracts fields within relevant contexts only
-- **Multiple LLM Support**: Works with Ollama (local) and Hugging Face
-- **Recovery Mechanisms**: Automatic fallback strategies for failed extractions
-
-### Orchestration
-- **LangGraph Pipeline**: Stateful, reliable workflow management with clear node separation
-- **Error Handling**: Comprehensive logging, error tracking, and recovery at each stage
-- **Metadata Tracking**: Pipeline metadata including timestamps, processing details, and performance metrics
-
-### Evaluation
-- **Extraction Metrics**: Field-level accuracy, completeness, and confidence scoring
-- **Comparison Framework**: Evaluate multiple extraction methods on the same documents
-- **Test Datasets**: Support for benchmark evaluation against gold-standard annotations
+### Three-Pass Extraction
+1. **Text LLM pass** — Full document text + schema fed to Flan-T5 or Ollama for initial JSON extraction
+2. **Vision LLM fallback** — Null fields after pass 1 are sent to a Groq vision model (Llama 4 Scout) for image-based recovery
+3. **Sentinel pass** — Remaining null fields are marked `"NaN"` for downstream handling
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         PDF Input                                   │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ 1. PDF Ingestion     │
-                    │ - Text extraction    │
-                    │ - OCR (fallback)     │
-                    │ - Bounding boxes     │
-                    └──────────┬───────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ 2. Layout Analysis   │
-                    │ - Token classification
-                    │ - LayoutLMv3         │
-                    │ - Structural labels  │
-                    └──────────┬───────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ 3. Clause Graph      │
-                    │ - Hierarchical build │
-                    │ - Section grouping   │
-                    │ - Context grounding  │
-                    └──────────┬───────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ 4. Schema Loading    │
-                    │ - Field definitions  │
-                    │ - Type constraints   │
-                    │ - Validation rules   │
-                    └──────────┬───────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ 5. Field Extraction  │
-                    │ - LLM-based          │
-                    │ - Schema-guided      │
-                    │ - Context-aware      │
-                    └──────────┬───────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ 6. Validation        │
-                    │ - Field validation   │
-                    │ - Error recovery     │
-                    │ - Completeness check │
-                    └──────────┬───────────┘
-                               │
-                               ▼
-                    ┌──────────────────────┐
-                    │ 7. JSON Output       │
-                    │ - Formatted results  │
-                    │ - Metadata included  │
-                    │ - Performance stats  │
-                    └──────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                      PDF Input                          │
+└──────────────────────────┬──────────────────────────────┘
+                           │
+              ┌────────────▼────────────┐
+              │   1. PDF Ingestion      │
+              │   PyMuPDF + Tesseract   │
+              └────────────┬────────────┘
+                           │
+              ┌────────────▼────────────┐
+              │   2. Layout Analysis    │
+              │   LayoutLMv3 + LoRA     │
+              │   adapter routing       │
+              └────────────┬────────────┘
+                           │
+            ┌──────────────┴──────────────┐
+            │                             │
+ ┌──────────▼──────────┐    ┌─────────────▼────────────┐
+ │  3a. Donut          │    │  3b. LayoutLM + FormFiller│
+ │  OCR-free, DocVQA   │    │  Token classification     │
+ │  pixel → fields     │    │  + 3-pass LLM extraction  │
+ └──────────┬──────────┘    └─────────────┬────────────┘
+            │                             │
+            └──────────────┬──────────────┘
+                           │  ExtractionBundle
+              ┌────────────▼────────────┐
+              │  4. Reflexive Policy    │
+              │  Fusion                 │
+              │  Confidence weighting   │
+              │  + consistency checks   │
+              └────────────┬────────────┘
+                           │
+              ┌────────────▼────────────┐
+              │  5. Groq Repair Pass    │
+              │  Field normalisation    │
+              └────────────┬────────────┘
+                           │
+              ┌────────────▼────────────┐
+              │  6. Schema Resolution   │
+              │  Registry match or      │
+              │  synthesis via LLM      │
+              └────────────┬────────────┘
+                           │
+              ┌────────────▼────────────┐
+              │  7. Validation +        │
+              │  Recovery               │
+              └────────────┬────────────┘
+                           │
+            ┌──────────────┴──────────────┐
+            │                             │
+ ┌──────────▼──────────┐    ┌─────────────▼────────────┐
+ │  8a. SQLite DB       │    │  8b. JSON Output          │
+ │  Schema-driven       │    │  Fields + metadata        │
+ │  dynamic tables      │    │  + pipeline stats         │
+ └─────────────────────┘    └──────────────────────────┘
 ```
 
 ---
 
 ## System Components
 
-### 1. **Ingestion Module** (`ingestion/`)
+### 1. Ingestion (`ingestion/`)
+
 Handles PDF processing and text extraction.
 
-**Key Classes**:
-- `DocumentBlock`: Represents a text block with metadata (page, bbox, confidence, source)
-- `PDFIngester`: Main ingestion class that extracts text and applies OCR fallback
+**Key classes**: `DocumentBlock`, `PDFIngester`
 
-**Features**:
-- Native PDF text extraction via PyMuPDF
-- OCR fallback when text confidence is low (configurable threshold)
-- Bounding box extraction for spatial awareness
-- Metadata collection (page count, document properties)
+- Native PDF text via PyMuPDF; OCR fallback (Tesseract) when text volume is below `ocr_threshold`
+- Bounding box extraction for spatial layout features
+- Outputs a list of `DocumentBlock` dicts with `page`, `text`, `bbox`, `confidence`, `source`
 
-**Example Use**:
 ```python
 from ingestion.ingestion import ingest_pdf
-
 blocks, metadata = ingest_pdf("data/raw/contract.pdf")
-print(f"Extracted {len(blocks)} blocks from {metadata['total_pages']} pages")
 ```
 
-### 2. **Layout Analysis Module** (`layout_analysis/`)
-Performs structural classification of document content.
+### 2. Layout Analysis (`layout_analysis/`)
 
-**Key Classes**:
-- `LayoutAnalyzer`: Analyzes document layout and builds clause graphs
+Structural classification of document tokens with backend selection:
 
-**Labels**:
-- `heading`: Section titles, numbered sections, all-caps text
-- `paragraph`: Body text paragraphs
-- `list_item`: Bulleted or numbered list items
-- `table`: Tabular content
-- `caption`: Captions or figure titles
-- `other`: Unclassified content
+1. **`AdapterLayoutAnalyzer`** — LoRA-adapted LayoutLMv3 (preferred when adapters exist)
+2. **`FineTunedLayoutAnalyzer`** — Legacy monolithic fine-tuned checkpoint
+3. **`HeuristicLayoutAnalyzer`** — Regex-based fallback, always available
 
-**Features**:
-- Two-mode operation: Fine-tuned LayoutLMv3 (if available) or heuristic fallback
-- Regex and pattern-based classification for reliability
-- Clause graph construction from labeled blocks
-- Token-to-block mapping for precise localization
+**Labels**: `heading`, `paragraph`, `list_item`, `table`, `caption`, `other`
 
-**Example Use**:
+The `AdapterRouter` singleton manages base model loading, adapter hot-swapping, and LRU caching (max 3 groups in memory simultaneously).
+
 ```python
 from layout_analysis.layout_structure import LayoutAnalyzer
-
 analyzer = LayoutAnalyzer()
-result = analyzer.analyze(blocks, page_image)
+result = analyzer.analyze(blocks, page_image, group_name="group_3")
 clause_graph = result["clause_graph"]
-predictions = result["predictions"]
 ```
 
-### 3. **Schema Module** (`schema/`)
-Manages field definitions and extraction schemas.
+### 3. Parallel Extraction (`extraction/`)
 
-**Key Classes**:
-- `SchemaManager`: Loads and manages schemas from JSON files
-- Schema utility function: `load_schema(form_name)`
+**`ParallelExtractor`** launches Donut and LayoutLM/FormFiller concurrently and returns an `ExtractionBundle`.
 
-**Schema Structure** (JSON):
-```json
-{
-  "form_name": "NDA_Form",
-  "version": "1.0",
-  "description": "Non-Disclosure Agreement extraction schema",
-  "fields": {
-    "field_name": {
-      "type": "date|string|number|boolean",
-      "description": "Field description",
-      "section": "Document section hint",
-      "required": true|false,
-      "examples": ["example1", "example2"],
-      "keywords": ["keyword1", "keyword2"],
-      "patterns": ["regex_pattern"]
-    }
-  }
-}
-```
+- `DonutExtractor` — one VQA round-trip per schema field; confidence derived from mean max token probability
+- `FormFiller` — 3-pass extraction (text LLM → vision LLM fallback → sentinel); forwards `adapter_group` to LayoutAnalyzer
+- `ExtractionBundle` exposes per-extractor field coverage and mean confidence
 
-**Default Schemas**:
-- `NDA_Form`: Pre-configured schema for NDAs with fields like:
-  - `effective_date`: Agreement effective date
-  - `termination_notice`: Notice period for termination
-  - `governing_law`: Jurisdiction and governing law
+**`ReflexivePolicyLayer`** fuses the bundle:
 
-### 4. **Extraction Module** (`extraction/`)
-Performs field-level extraction using LLMs.
+| Field type | Preferred source |
+|---|---|
+| Dates, amounts, spatial fields | LayoutLM |
+| Party names, governing law, clauses | Donut |
+| Tie (Δconfidence < 5%) | Higher-coverage extractor |
 
-**Key Classes**:
-- `LLMExtractor`: Handles LLM-based field extraction with structured output
-- `FormFiller`: Populates form instances using clause graphs and schemas
-- `VisionDirectExtractor`: Direct extraction using a vision-capable LLM
-- `LlamaDirectExtractor`: Direct extraction using Llama 3.2 vision (Ollama)
+### 4. Schema Agent (`schema/schema_agent.py`)
 
-**Extraction Strategies**:
-1. **Regex-Based**: Fast, reliable for structured fields (dates, phone numbers)
-2. **Keyword-Based**: Context matching using field keywords
-3. **LLM-Based**: Flexible extraction for complex fields (descriptions, open-ended text)
+Groq-powered agent with three operations:
 
-### 5. **Validation Module** (`utils/`)
-Validates extracted fields and handles recovery.
+- **Normalise** — clean values, fix OCR artefacts, standardise dates to ISO 8601
+- **Map** — semantically align extracted fields to a candidate schema's field names
+- **Synthesise** — generate a new schema definition from observed fields when no registry match is found
 
-### 6. **Orchestration Module** (`orchestration/`)
-Coordinates the entire pipeline using LangGraph.
+All operations use JSON-only prompts with one automatic retry on parse failure.
 
-### 7. **Evaluation Module** (`evaluation/`)
-Metrics and benchmarking for extraction quality.
+### 5. Schema Registry (`schema/schema_registry.py`)
+
+- Encodes field descriptions as MiniLM-L6-v2 embeddings; computes cosine similarity against stored centroids
+- Persists `.npy` embedding files and full schema JSON per `schema_id`
+- Mirrors registrations to SQLite via `DatabaseManager.upsert_schema`
+
+### 6. Database Manager (`database/db_manager.py`)
+
+Schema-driven SQLite manager:
+
+- `ensure_table` — creates or `ALTER TABLE`s to add new fields dynamically based on schema definition
+- `insert_record` — inserts extracted fields with system columns (`_record_id`, `_schema_version`, `_ingested_at`, `_confidence_avg`)
+- `upsert_schema` — stores schema definitions in `_schemas` table with versioning
+
+### 7. Orchestrator (`orchestration/orchestrator.py`)
+
+LangGraph `StateGraph` with 8 sequential nodes. The `ContractState` TypedDict carries all pipeline state including the resolved `adapter_group`.
+
+Adapter group is resolved once before the graph runs via `_resolve_adapter_group`, which looks up `group_for_schema(form_name)` from `finetune/adapter_groups.py`.
 
 ---
 
 ## Installation & Setup
 
 ### Prerequisites
-- Python 3.9+
-- pip or conda
-- For OCR: Tesseract-OCR system package
-- For Ollama support: Ollama installed and running (optional)
+- Python 3.10+
+- Tesseract-OCR system package (for OCR fallback)
+- Groq API key (for schema agent and vision fallback)
+- Ollama (optional, for local LLM)
 
-### Step 1: Clone Repository
+### Steps
+
 ```bash
 git clone <repository-url>
 cd multiagent-form-schema-etl
-```
 
-### Step 2: Create Virtual Environment
-```bash
-# Using venv
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-# Or using conda
-conda create -n form-etl python=3.9
-conda activate form-etl
-```
-
-### Step 3: Install Dependencies
-```bash
 pip install -r requirements.txt
-```
 
-### Step 4: Download Spacy Model (Optional)
-```bash
+# Optional: spaCy model
 python -m spacy download en_core_web_sm
 ```
 
-### Step 5: Configure Models
-Edit `.env` file (create if not exists):
+### Environment
+
+Create a `.env` file:
+
 ```env
-# Vision model API keys (optional)
-# e.g. PROVIDER_API_KEY=your-api-key-here
+HF_TOKEN=hf_...          # Required for gated datasets (DocVQA, Kleister-NDA, etc.)
+GROQ_API_KEY=gsk_...     # Required for schema agent and vision fallback
 ```
 
-### Step 6: Prepare Data
-```bash
-mkdir -p data/raw data/outputs data/schemas data/test
-# Place PDF files in data/raw/
-```
+### Directory bootstrap
 
-### Step 7: Verify Installation
 ```bash
-python -c "from ingestion.ingestion import ingest_pdf; print('Installation successful')"
+mkdir -p data/raw data/outputs data/schemas data/test data/schema_registry
 ```
 
 ---
 
 ## Configuration
 
-Configuration is managed through `config/config.py` using dataclasses.
+Configuration lives in `config/config.py` as a hierarchy of frozen dataclasses, accessed via `get_config()`.
 
-### Model Configuration (`ModelConfig`)
-- (Removed Gemini-specific model configuration)
-- `layout_model`: Path to LayoutLMv3 checkpoint or "fallback"
-- `llm_model`: LLM model spec: "ollama/model", "hf-model", etc. (default: "ollama/llama3.2")
-- `llm_temperature`: Sampling temperature (default: 0.1)
-- `llm_max_tokens`: Max output tokens (default: 256)
-- `device`: "auto", "cpu", "cuda" (default: "auto")
+### Key settings
 
-### Programmatic Configuration
+| Section | Key | Default | Description |
+|---|---|---|---|
+| `model` | `layout_model` | `models/layoutlmv3-nda/checkpoint_best` | Legacy layout checkpoint path |
+| `model` | `adapter_root` | `models/adapters` | LoRA adapter root directory |
+| `model` | `donut_model` | `naver-clova-ix/donut-base-finetuned-docvqa` | Donut checkpoint |
+| `model` | `llm_model` | `google/flan-t5-base` | Text LLM for pass 1 extraction |
+| `groq` | `vision_model` | `meta-llama/llama-4-scout-17b-16e-instruct` | Vision model for pass 2 |
+| `groq` | `synthesis_model` | `llama-3.3-70b-versatile` | Model for schema synthesis |
+| `processing` | `schema_sim_threshold` | `0.70` | Cosine similarity floor for registry match |
+| `processing` | `confidence_threshold` | `0.70` | Confidence floor for policy fusion |
+
+Feature flags: `enable_parallel_extraction`, `enable_schema_agent`, `enable_schema_recognition`, `enable_db_population`, `enable_lora_adapters`.
+
 ```python
-from config.config import get_config, update_config
-
-cfg = get_config()
-update_config(enable_validation=False, verbose=True)
+from config.config import update_config
+update_config(enable_schema_agent=False, verbose=True)
 ```
 
 ---
 
 ## Usage
 
-### Quick Start
-```bash
-# Process a single PDF
-python main.py --input data/raw/sample_contract.pdf
+### CLI
 
-# Use vision-based extractors (provider-dependent)
-python main.py --input data/raw/contract.pdf --use-llama --form-name NDA_Form
+```bash
+# Process a PDF with a named schema
+python main.py --pdf data/raw/contract.pdf --form NDA_Form
+
+# Use a stored schema ID
+python main.py --pdf contract.pdf --schema-id <uuid>
+
+# Offline mode (no Groq)
+python main.py --pdf contract.pdf --form NDA_Form --no-schema-agent
+
+# LayoutLM only (skip Donut)
+python main.py --pdf contract.pdf --form NDA_Form --no-donut
+
+# List all registered schemas
+python main.py --list-schemas
+
+# Query extracted records
+python main.py --query-db NDA_Form
 ```
 
-### Programmatic Usage
+### Programmatic
+
 ```python
 from pathlib import Path
-import json
 from ingestion.ingestion import ingest_pdf
 from orchestration.orchestrator import get_orchestrator
+import fitz
+from PIL import Image
 
 pdf_path = Path("data/raw/contract.pdf")
 blocks, metadata = ingest_pdf(str(pdf_path))
 
-orchestrator = get_orchestrator()
-output = orchestrator.process(blocks, pdf_path, "NDA_Form")
+doc = fitz.open(str(pdf_path))
+pix = doc.load_page(0).get_pixmap()
+page_image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+doc.close()
 
-output_path = Path("data/outputs") / f"{pdf_path.stem}_extracted.json"
-with open(output_path, "w") as f:
-    json.dump(output, f, indent=2)
+state = {
+    "blocks": blocks,
+    "page_image": page_image,
+    "pdf_metadata": metadata,
+    "schema_recognition": {"form_name": "NDA_Form"},
+    "schema": {},
+    "clause_graph": {},
+    "output": {},
+    "errors": [],
+    "warnings": [],
+}
+
+final_state = get_orchestrator().process(state)
+print(final_state["output"]["fields"])
 ```
 
 ---
 
 ## Project Structure
+
 ```
 multiagent-form-schema-etl/
-├── main.py                          # Entry point
-├── requirements.txt                 # Dependencies
-├── config/                          # Configuration
-├── data/                            # Data directory
-│   ├── raw/                         # Input PDFs
-│   ├── outputs/                     # Extraction results
-│   ├── schemas/                     # Schema definitions
-│   └── intermediate/                # Pipeline intermediate results
-├── ingestion/                       # PDF text/OCR extraction
-├── layout_analysis/                 # LayoutLMv3-based classification
-├── schema/                          # Schema management
-├── extraction/                      # LLM-based field extraction
-├── orchestration/                   # Pipeline orchestration
-├── utils/                           # Utilities
-├── evaluation/                      # Metrics and benchmarking
-├── finetune/                        # LayoutLMv3 fine-tuning
-└── models/                          # Model checkpoints
+├── main.py                        # CLI entry point
+├── requirements.txt
+├── config/
+│   └── config.py                  # Dataclass config hierarchy
+├── ingestion/
+│   └── ingestion.py               # PyMuPDF + Tesseract OCR
+├── layout_analysis/
+│   ├── layout_structure.py        # LayoutAnalyzer (adapter / legacy / heuristic)
+│   └── adapter_router.py          # LoRA adapter hot-swap manager
+├── extraction/
+│   ├── parallel_extractor.py      # ThreadPoolExecutor orchestrator + ExtractionBundle
+│   ├── donut_extractor.py         # OCR-free DocVQA extraction
+│   ├── form_filler.py             # 3-pass text+vision extraction
+│   ├── llama_extractor.py         # Groq vision extractor (GroqVisionExtractor)
+│   └── policy_layer.py            # ReflexivePolicyLayer fusion + normalisation
+├── schema/
+│   ├── schema.py                  # SchemaManager (SQLite-backed)
+│   ├── schema_agent.py            # Groq normalise / map / synthesise agent
+│   ├── schema_registry.py         # MiniLM embedding registry
+│   └── schema_recognizer.py       # Auto schema recognition from page image
+├── orchestration/
+│   └── orchestrator.py            # LangGraph 8-node pipeline
+├── database/
+│   └── db_manager.py              # Schema-driven SQLite manager
+├── finetune/
+│   ├── train.py                   # Full fine-tune entry point
+│   ├── train_lora.py              # LoRA adapter training entry point
+│   ├── adapter_groups.py          # 3-group curriculum definition + SCHEMA_TO_GROUP
+│   ├── data_loader.py             # Multi-dataset loader with normalised/augmented cache
+│   ├── layoutlmv3_trainer.py      # LLRD + ForTokenClassification trainer
+│   ├── lora_layoutlmv3_trainer.py # PEFT LoRA adapter trainer
+│   ├── donut_trainer.py           # Donut seq2seq schema recognition trainer
+│   ├── lora_donut_trainer.py      # PEFT LoRA Donut trainer
+│   ├── normalizers.py             # Per-dataset normalisation to unified format
+│   ├── metrics.py                 # CER, F1, label-containment assignment
+│   ├── config.py                  # Label space, DatasetSpec, DATASET_SPECS
+│   └── augmentation.py            # Albumentations image augmentation
+├── evaluation/
+│   └── evaluator.py               # ExtractionMetrics, baseline comparison, report
+├── utils/
+│   ├── form.py                    # FormInstance data structure
+│   └── validation.py              # FieldValidator + ValidationRecoveryManager
+└── data/
+    ├── raw/                       # Input PDFs
+    ├── outputs/                   # Extracted JSON results
+    ├── schemas/                   # Schema JSON files
+    ├── schema_registry/           # MiniLM embeddings + schema JSONs
+    └── intermediate/              # Per-stage pipeline summaries
 ```
+
+---
+
+## Fine-tuning
+
+### Dataset groups
+
+Datasets are organised into three curriculum groups defined in `finetune/adapter_groups.py`:
+
+| Group | Datasets | Focus |
+|---|---|---|
+| `group_1` | CORD, SROIE, SynthDog-EN | Layout-primitive / receipt-like |
+| `group_2` | FUNSD, RVL-CDIP, DocLayNet, DocBank | Structural classification |
+| `group_3` | DocVQA, Kleister-NDA, InfographicVQA | Reasoning-heavy / clause extraction |
+
+> **Note**: Several datasets are gated on HuggingFace (DocVQA, Kleister-NDA, InfographicVQA). Accept their terms at `huggingface.co/datasets/<repo_id>` and set `HF_TOKEN` in `.env` before training.
+
+### LoRA adapter training (recommended)
+
+```bash
+# Train all three groups (both LayoutLMv3 and Donut adapters)
+python finetune/train_lora.py
+
+# Train a single group
+python finetune/train_lora.py --groups group_3
+
+# LayoutLMv3 adapters only, quick smoke-test
+python finetune/train_lora.py --model layoutlmv3 --max-train-samples 100 --no-augment
+```
+
+Adapters are saved to `models/adapters/group_{1,2,3}/{layoutlmv3,donut}/`. The pipeline automatically detects and routes to them at inference.
+
+### Full fine-tune
+
+```bash
+# Both models, all datasets, curriculum ordering
+python finetune/train.py --all-datasets --curriculum
+
+# LayoutLMv3 only
+python finetune/train.py --model layoutlmv3 --epochs 10 --batch-size 2
+```
+
+### Training features
+
+- **LLRD** (layer-wise LR decay) for full LayoutLMv3 fine-tune — head gets `base_lr`, lower encoder layers decay by `llrd_factor` (default 0.9)
+- **Cosine LR schedule** with 6% warmup ratio
+- **bf16** on CUDA, gradient accumulation (steps=8)
+- **Early stopping** patience=3 on macro-F1 (LayoutLMv3) or CER (Donut)
+- **Normalised and augmented dataset caches** persist between runs to avoid redundant preprocessing
+- **Albumentations augmentation**: rotation ±3°, brightness/contrast jitter, JPEG compression, Gaussian blur
 
 ---
 
 ## Supported Models
 
-### Layout Models
-| Model | Location | Status |
-|-------|----------|--------|
-| **LayoutLMv3 Fine-tuned** | `models/layoutlmv3-nda/` | ✅ Recommended |
-| **Fallback (Heuristic)** | Built-in | ✅ Always available |
+### Layout analysis
 
-### LLM Models
-| Provider | Model | Config | Status |
-|----------|-------|--------|--------|
-| **Ollama (Local)** | `ollama/llama3.2` | Local, private | ✅ Recommended |
-| **Hosted Vision API** | `provider-model` | Cloud/hosted, reliable | provider-dependent |
+| Backend | Location | Notes |
+|---|---|---|
+| LoRA adapters | `models/adapters/group_*/layoutlmv3/` | Preferred; ~8–15 MB per group |
+| Legacy checkpoint | `models/layoutlmv3-nda/checkpoint_best` | ~500 MB monolithic fine-tune |
+| Heuristic | Built-in | Regex fallback, always available |
 
----
+### LLM backends
 
-## Development
-
-### Setup Development Environment
-```bash
-pip install -r requirements.txt
-pip install pytest pytest-cov black flake8
-```
-
-### Running Tests
-```bash
-pytest
-pytest --cov=. --cov-report=html
-```
-
-### Code Formatting
-```bash
-black . --line-length 100
-flake8 . --max-line-length 100
-```
-
-### Fine-tuning LayoutLMv3
-```bash
-python finetune/train.py --generate --n_samples 300 --epochs 5
-```
+| Role | Model | Provider |
+|---|---|---|
+| Pass 1 text extraction | `google/flan-t5-base` or `ollama/llama3.2` | HuggingFace / Ollama |
+| Pass 2 vision fallback | `meta-llama/llama-4-scout-17b-16e-instruct` | Groq |
+| Schema normalise / map | `llama-3.1-8b-instant` | Groq |
+| Schema synthesis | `llama-3.3-70b-versatile` | Groq |
 
 ---
 
 ## Performance
 
-### Typical Processing Times
-| Stage | Time |
-|-------|------|
-| Ingestion | 0.5-2s |
-| Layout Analysis | 2-5s |
-| Extraction | 3-10s |
-| Validation | 0.5-1s |
-| **Total** | **7-20s** |
+### Resource requirements
 
-### Resource Requirements
-- **Minimum**: CPU-only, 4GB RAM
-- **Recommended**: GPU (CUDA), 8GB RAM
-- **Optimal**: GPU with 16GB+ VRAM
-
-### Throughput
-- **Local (CPU)**: 3-5 documents/minute
-- **Local (GPU)**: 10-20 documents/minute
-- **Batch with vision API**: 20-30 documents/minute (provider-dependent)
+- **Minimum**: CPU only, 8 GB RAM
+- **Recommended**: CUDA GPU, 16 GB RAM
+- **LoRA adapters**: 3 × ~12 MB vs one ~500 MB monolithic checkpoint
 
 ---
 
 ## Troubleshooting
 
-### OCR Not Working
-```
-Solution: Install Tesseract-OCR system package
-  - Ubuntu: sudo apt-get install tesseract-ocr
-  - macOS: brew install tesseract
+**Gated dataset 401 errors**
+Set `HF_TOKEN` in `.env` and accept the dataset terms at `huggingface.co`.
+
+**Groq API errors**
+Set `GROQ_API_KEY` in `.env`. Use `--no-schema-agent` for offline operation.
+
+**Tesseract not found**
+```bash
+# Ubuntu
+sudo apt-get install tesseract-ocr
+# macOS
+brew install tesseract
 ```
 
-### Ollama Connection Issues
-```
-Solution:
-  1. Ensure Ollama is running: ollama serve
-  2. Check model is available: ollama list
-  3. Verify config: llm_model = "ollama/llama3.2"
-```
-
-### Extraction Returns None
-```
-Solution:
-  1. Enable verbose logging for context
-  2. Verify schema keywords/patterns
-  3. Check LLM max_tokens
-  4. Enable recovery: enable_recovery = True
+**No schema found**
+Register a schema before running the pipeline:
+```python
+from schema.schema import SchemaManager
+SchemaManager().add_schema(your_schema_dict)
 ```
 
----
+**Adapter not loading**
+Train adapters first with `python finetune/train_lora.py`. Until then the pipeline silently falls back to the heuristic analyzer.
 
 ## License
 
-MIT License - Copyright (c) 2024
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction.
-
----
-
-## Support & Contributing
-
-### Issues & Feature Requests
-Please open GitHub issues for bugs or feature requests.
-
-### Contributing Guidelines
-1. Fork the repository
-2. Create a feature branch
-3. Commit changes
-4. Push to branch
-5. Open Pull Request
-
-**Questions?** Check the examples directory or open an issue on GitHub.
+MIT License — Copyright (c) 2024
