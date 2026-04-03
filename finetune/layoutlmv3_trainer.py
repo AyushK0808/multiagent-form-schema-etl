@@ -12,6 +12,8 @@ Key design decisions
 - Token labels derived from bounding-box containment (metrics.assign_labels_by_containment)
 - Subword continuation tokens get label=-100 (ignored in cross-entropy loss)
 - Cosine LR schedule, bf16, gradient accumulation, early stopping
+- Per-epoch CSV log  → <output_dir>/training_log.csv
+- Matplotlib plots   → <output_dir>/plots/
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from PIL import Image
 
 from config import ID2LABEL, LABEL2ID, NUM_LABELS
 from metrics import assign_labels_by_containment
+from metrics_logger import EpochCSVLogger, generate_training_plots
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +43,6 @@ def _build_llrd_optimizer(
     llrd_factor: float = 0.9,
     weight_decay: float = 0.01,
 ) -> torch.optim.AdamW:
-    """
-    AdamW with per-layer learning rates.
-
-    Head → base_lr
-    Encoder layer k (counting from top) → base_lr * llrd_factor^k
-    Embeddings → base_lr * llrd_factor^(num_layers+1)
-
-    Bias and LayerNorm params are excluded from weight decay.
-    """
     no_decay = {"bias", "LayerNorm.weight", "layer_norm.weight"}
 
     def _groups(prefix: str, lr: float) -> List[Dict]:
@@ -89,7 +83,6 @@ def _build_llrd_optimizer(
 
 
 class _LLRDMixin:
-    """Overrides Trainer.create_optimizer with the LLRD-aware version."""
     _llrd_factor: float = 0.9
 
     def create_optimizer(self):
@@ -110,13 +103,6 @@ def _encode_example(
     processor,
     max_length: int,
 ) -> Dict:
-    """
-    Run the LayoutLMv3Processor (apply_ocr=True) on one image, then assign
-    a label to each OCR word via bounding-box containment.
-
-    Subword tokens that continue a word get label=-100 (cross-entropy ignored).
-    Special / padding tokens also get label=-100.
-    """
     image    = example["image"]
     segments = example.get("segments", [])
 
@@ -139,9 +125,8 @@ def _encode_example(
         }
 
     word_ids   = enc.word_ids(batch_index=0)
-    raw_bboxes = enc["bbox"].squeeze(0).tolist()   # already 0-1000 scale
+    raw_bboxes = enc["bbox"].squeeze(0).tolist()
 
-    # Map word index → first-subword bbox
     word_to_bbox: Dict[int, List[int]] = {}
     for tok_idx, wid in enumerate(word_ids):
         if wid is not None and wid not in word_to_bbox:
@@ -156,7 +141,6 @@ def _encode_example(
     else:
         word_label_ids = [LABEL2ID["paragraph"]] * num_words
 
-    # Align to subword tokens
     token_labels: List[int] = []
     seen: set = set()
     for wid in word_ids:
@@ -183,7 +167,6 @@ def _encode_example(
 
 
 def _preprocess_dataset(dataset, processor, max_length: int):
-    """Encode an entire split; returns a torch-format dataset."""
     encoded = dataset.map(
         lambda ex: _encode_example(ex, processor, max_length),
         batched=False,
@@ -217,6 +200,9 @@ def train_layoutlmv3(
         TrainingArguments,
     )
 
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     processor = LayoutLMv3Processor.from_pretrained(
         "microsoft/layoutlmv3-base", apply_ocr=True
     )
@@ -249,6 +235,9 @@ def train_layoutlmv3(
 
     _LLRDTrainer._llrd_factor = llrd_factor
 
+    # ── CSV + plot callback ───────────────────────────────────────────────
+    csv_logger = EpochCSVLogger(output_dir / "training_log.csv")
+
     args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=batch_size,
@@ -279,7 +268,7 @@ def train_layoutlmv3(
         eval_dataset=encoded_val,
         compute_metrics=compute_metrics,
         tokenizer=processor,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3), csv_logger],
     )
 
     trainer.train()
@@ -289,6 +278,17 @@ def train_layoutlmv3(
 
     (output_dir / "label_map.json").write_text(json.dumps(ID2LABEL, indent=2), encoding="utf-8")
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+
+    # ── Generate plots ────────────────────────────────────────────────────
+    try:
+        generate_training_plots(
+            output_dir,
+            primary_metric="eval_macro_f1",
+            higher_is_better=True,
+            model_label="LayoutLMv3",
+        )
+    except Exception as exc:
+        logger.warning("[LayoutLMv3] Plot generation failed: %s", exc)
 
     logger.info(
         "[LayoutLMv3] Done — macro_f1=%.4f  accuracy=%.4f",

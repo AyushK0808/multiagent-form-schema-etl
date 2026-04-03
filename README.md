@@ -310,6 +310,20 @@ python main.py --list-schemas
 python main.py --query-db NDA_Form
 ```
 
+### Streamlit UI
+
+```bash
+streamlit run ui/app.py
+```
+
+The UI exposes three screens:
+
+- `Generate Schema` - upload a document, optionally force a stored schema, run schema recognition when needed, and execute the ETL pipeline from the same screen
+- `Add / Update Schema` - edit schemas in a form builder or raw JSON editor and save them back to SQLite / the schema registry
+- `Training` - configure full fine-tuning or LoRA adapter jobs and launch the existing training scripts
+
+Each screen also includes a `UI Event Log` so schema selection, recognition, schema saves, pipeline runs, and training launches are visible without checking terminal output.
+
 ### Programmatic
 
 ```python
@@ -353,6 +367,16 @@ multiagent-form-schema-etl/
 ├── requirements.txt
 ├── config/
 │   └── config.py                  # Dataclass config hierarchy
+├── ui/
+│   ├── app.py                     # Thin Streamlit entry point
+│   ├── services.py                # UI-facing schema, pipeline, and training helpers
+│   ├── state.py                   # Streamlit session-state + UI event log helpers
+│   ├── theme.py                   # Shared Streamlit theme injection
+│   ├── widgets.py                 # Shared hero, preview, and log widgets
+│   └── screens/
+│       ├── recognition.py         # Upload, schema recognition, and pipeline execution screen
+│       ├── schema_editor.py       # Form-builder and JSON schema editor screen
+│       └── training.py            # Training launcher screen
 ├── ingestion/
 │   └── ingestion.py               # PyMuPDF + Tesseract OCR
 ├── layout_analysis/

@@ -12,6 +12,8 @@ Key design decisions
 - Metric: CER (character error rate) + exact schema match
 - Curriculum ordering is handled upstream in data_loader.build_combined_dataset
 - EarlyStoppingCallback(patience=3) on CER (lower = better)
+- Per-epoch CSV log  → <output_dir>/training_log.csv
+- Matplotlib plots   → <output_dir>/plots/
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ import torch
 
 from config import DONUT_TASK_PROMPT
 from metrics import compute_cer
+from metrics_logger import EpochCSVLogger, generate_training_plots
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +37,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _preprocess_dataset(dataset, processor, max_length: int):
-    """Encode images + schema label strings into pixel_values + label token ids."""
-
     def encode(example: Dict) -> Dict:
         target       = json.dumps({"schema": example["label_text"]}, ensure_ascii=True)
         pixel_values = processor(example["image"], return_tensors="pt").pixel_values.squeeze(0)
@@ -48,7 +49,6 @@ def _preprocess_dataset(dataset, processor, max_length: int):
             truncation=True,
             return_tensors="pt",
         ).input_ids.squeeze(0)
-        # Padding positions are masked from the loss
         labels[labels == processor.tokenizer.pad_token_id] = -100
         return {"pixel_values": pixel_values, "labels": labels}
 
@@ -83,6 +83,9 @@ def train_donut(
         VisionEncoderDecoderModel,
     )
 
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     processor = DonutProcessor.from_pretrained("naver-clova-ix/donut-base")
     added     = processor.tokenizer.add_special_tokens(
         {"additional_special_tokens": [DONUT_TASK_PROMPT]}
@@ -104,7 +107,6 @@ def train_donut(
 
     def compute_metrics(eval_pred):
         pred_ids, label_ids = eval_pred
-        # Replace padding sentinel so tokenizer can decode cleanly
         label_ids   = np.where(label_ids == -100, processor.tokenizer.pad_token_id, label_ids)
         preds_str   = processor.batch_decode(pred_ids,  skip_special_tokens=True)
         refs_str    = processor.batch_decode(label_ids, skip_special_tokens=True)
@@ -129,6 +131,9 @@ def train_donut(
             "labels":       torch.stack([f["labels"]       for f in features]),
         }
 
+    # ── CSV + plot callback ───────────────────────────────────────────────
+    csv_logger = EpochCSVLogger(output_dir / "training_log.csv")
+
     args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=batch_size,
@@ -145,8 +150,8 @@ def train_donut(
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="cer",
-        greater_is_better=False,          # lower CER = better
-        predict_with_generate=True,       # required — feeds decoded seqs to compute_metrics
+        greater_is_better=False,
+        predict_with_generate=True,
         generation_max_length=max_length,
         remove_unused_columns=False,
         logging_steps=25,
@@ -161,7 +166,7 @@ def train_donut(
         data_collator=collate,
         tokenizer=processor.tokenizer,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3), csv_logger],
     )
 
     trainer.train()
@@ -171,6 +176,17 @@ def train_donut(
 
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     (output_dir / "task_prompt.txt").write_text(DONUT_TASK_PROMPT, encoding="utf-8")
+
+    # ── Generate plots ────────────────────────────────────────────────────
+    try:
+        generate_training_plots(
+            output_dir,
+            primary_metric="eval_cer",
+            higher_is_better=False,   # lower CER = better
+            model_label="Donut",
+        )
+    except Exception as exc:
+        logger.warning("[Donut] Plot generation failed: %s", exc)
 
     logger.info(
         "[Donut] Done — CER=%.4f  exact_match=%.4f",

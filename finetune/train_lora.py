@@ -19,6 +19,9 @@ python train_lora.py --max-train-samples 100 --no-augment
 
 # LayoutLMv3 adapters only (skip Donut)
 python train_lora.py --model layoutlmv3
+
+# Restrict to specific datasets across all selected groups
+python train_lora.py --groups group_1 group_2 --datasets CORD FUNSD SROIE
 """
 from __future__ import annotations
 
@@ -61,6 +64,18 @@ def parse_args() -> argparse.Namespace:
         help="Which adapter groups to train",
     )
     parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=None,
+        metavar="DATASET_NAME",
+        help=(
+            "Restrict training to specific datasets. "
+            "Only datasets that also belong to the selected group(s) are used. "
+            "If omitted, all datasets in each group are used. "
+            "Example: --datasets CORD FUNSD KLEISTER_NDA"
+        ),
+    )
+    parser.add_argument(
         "--output-root", type=Path,
         default=Path("models") / "adapters",
         help="Root dir; each group saved under <root>/<group_name>/",
@@ -98,14 +113,35 @@ def _train_group(
 ) -> None:
     logger.info("=" * 60)
     logger.info("  Adapter group: %s  (%s)", grp.name, grp.label)
-    logger.info("  Datasets: %s", grp.datasets)
+    logger.info("  Group datasets: %s", grp.datasets)
     logger.info("=" * 60)
 
-    # Filter DATASET_SPECS to only the datasets in this group that exist
+    # Start with datasets that belong to this group and exist in DATASET_SPECS
     available = [d for d in grp.datasets if d in DATASET_SPECS]
+
+    # Apply --datasets filter if provided
+    if args.datasets:
+        filtered = [d for d in available if d in args.datasets]
+        if not filtered:
+            logger.warning(
+                "[%s] --datasets filter excluded all datasets for this group "
+                "(group datasets: %s, filter: %s) — skipping",
+                grp.name, available, args.datasets,
+            )
+            return
+        if filtered != available:
+            logger.info(
+                "[%s] --datasets filter: using %s (excluded: %s)",
+                grp.name, filtered,
+                [d for d in available if d not in filtered],
+            )
+        available = filtered
+
     if not available:
         logger.warning("[%s] No available datasets — skipping", grp.name)
         return
+
+    logger.info("[%s] Training on: %s", grp.name, available)
 
     # Build combined dataset for this group (curriculum order within the group)
     train_ds, val_ds, label2id, id2label, manifest = build_combined_dataset(
@@ -130,6 +166,7 @@ def _train_group(
                 "group":       grp.name,
                 "label":       grp.label,
                 "datasets":    manifest,
+                "datasets_filter": args.datasets,
                 "train_n":     len(train_ds),
                 "val_n":       len(val_ds),
                 "augmented":   augment,
@@ -186,8 +223,8 @@ def main() -> None:
         augment = False
 
     logger.info(
-        "LoRA training — groups=%s  model=%s  augment=%s  bf16=%s",
-        args.groups, args.model, augment, torch.cuda.is_available(),
+        "LoRA training — groups=%s  model=%s  datasets_filter=%s  augment=%s  bf16=%s",
+        args.groups, args.model, args.datasets, augment, torch.cuda.is_available(),
     )
 
     target_groups = [g for g in ADAPTER_GROUPS if g.name in args.groups]

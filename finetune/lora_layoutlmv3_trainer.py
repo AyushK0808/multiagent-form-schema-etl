@@ -11,12 +11,13 @@ Key differences from layoutlmv3_trainer.py
 - Each adapter group is trained independently and saved to its own subdir
   under `output_root / group_name /`.
 - Adapter checkpoints are tiny (~8-15 MB each vs ~500 MB for a full model).
+- Per-epoch CSV log  → <output_dir>/training_log.csv
+- Matplotlib plots   → <output_dir>/plots/
 
 LoRA configuration
 ------------------
-- target_modules : ["query", "value"]  — standard for encoder-only transformers
-- r=16, lora_alpha=32                  — good default; increase r for Group 3
-  (reasoning-heavy) if macro_f1 plateaus
+- target_modules : ["query", "value"]
+- r=16, lora_alpha=32  (Group 3 uses r=32)
 - lora_dropout=0.1
 - task_type=TOKEN_CLS
 
@@ -37,27 +38,26 @@ from PIL import Image
 
 from config import ID2LABEL, LABEL2ID, NUM_LABELS
 from metrics import assign_labels_by_containment
+from metrics_logger import EpochCSVLogger, generate_training_plots
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# LoRA config factory — Group 3 gets a larger rank for complex reasoning tasks
+# LoRA config factory
 # ---------------------------------------------------------------------------
 
 def _make_lora_config(group_name: str):
-    """Return a PEFT LoraConfig tuned for the adapter group."""
     try:
         from peft import LoraConfig, TaskType
     except ImportError:
         raise RuntimeError("peft not installed. Run: pip install peft")
 
-    # Group 3 (reasoning / NDA) benefits from a slightly larger rank
     r = 32 if group_name == "group_3" else 16
     return LoraConfig(
         task_type=TaskType.TOKEN_CLS,
         r=r,
-        lora_alpha=r * 2,          # standard: alpha = 2 * r
+        lora_alpha=r * 2,
         target_modules=["query", "value"],
         lora_dropout=0.1,
         bias="none",
@@ -66,7 +66,7 @@ def _make_lora_config(group_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Token-classification preprocessing  (shared with layoutlmv3_trainer.py)
+# Token-classification preprocessing
 # ---------------------------------------------------------------------------
 
 def _encode_example(example: Dict, processor, max_length: int) -> Dict:
@@ -158,15 +158,6 @@ def train_lora_layoutlmv3(
     learning_rate: float,
     max_length: int,
 ) -> Dict:
-    """
-    Fine-tune LayoutLMv3 with LoRA for one adapter group.
-
-    Parameters
-    ----------
-    train_dataset, val_dataset : HuggingFace datasets
-    output_dir   : where to save the adapter (e.g. models/adapters/group_1)
-    group_name   : "group_1" | "group_2" | "group_3"
-    """
     try:
         from peft import get_peft_model, PeftModel
     except ImportError:
@@ -184,9 +175,6 @@ def train_lora_layoutlmv3(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Load base model + wrap with LoRA
-    # ------------------------------------------------------------------
     logger.info("[LoRA-%s] Loading base model microsoft/layoutlmv3-base", group_name)
     processor = LayoutLMv3Processor.from_pretrained(
         "microsoft/layoutlmv3-base", apply_ocr=True
@@ -201,19 +189,13 @@ def train_lora_layoutlmv3(
 
     lora_cfg = _make_lora_config(group_name)
     model    = get_peft_model(base_model, lora_cfg)
-    model.print_trainable_parameters()   # logs e.g. "trainable params: 2,097,152 || ..."
+    model.print_trainable_parameters()
 
-    # ------------------------------------------------------------------
-    # Preprocess
-    # ------------------------------------------------------------------
     logger.info("[LoRA-%s] Preprocessing train split …", group_name)
     encoded_train = _preprocess_dataset(train_dataset, processor, max_length)
     logger.info("[LoRA-%s] Preprocessing val split …", group_name)
     encoded_val   = _preprocess_dataset(val_dataset,   processor, max_length)
 
-    # ------------------------------------------------------------------
-    # Metrics
-    # ------------------------------------------------------------------
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
         preds  = np.argmax(logits, axis=-1).flatten()
@@ -225,9 +207,9 @@ def train_lora_layoutlmv3(
             "accuracy": round(float((preds == labels).mean()), 4),
         }
 
-    # ------------------------------------------------------------------
-    # Training args  — flat AdamW, no LLRD needed (base is frozen)
-    # ------------------------------------------------------------------
+    # ── CSV + plot callback ───────────────────────────────────────────────
+    csv_logger = EpochCSVLogger(output_dir / "training_log.csv")
+
     args = TrainingArguments(
         output_dir=str(output_dir / "checkpoints"),
         per_device_train_batch_size=batch_size,
@@ -258,19 +240,13 @@ def train_lora_layoutlmv3(
         eval_dataset=encoded_val,
         compute_metrics=compute_metrics,
         tokenizer=processor,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3), csv_logger],
     )
 
-    # ------------------------------------------------------------------
-    # Train
-    # ------------------------------------------------------------------
     logger.info("[LoRA-%s] Starting training …", group_name)
     trainer.train()
 
-    # ------------------------------------------------------------------
-    # Save adapter only (NOT the full model — keeps checkpoint tiny)
-    # ------------------------------------------------------------------
-    model.save_pretrained(str(output_dir))          # saves adapter_config.json + adapter weights
+    model.save_pretrained(str(output_dir))
     processor.save_pretrained(str(output_dir))
 
     metrics = trainer.evaluate()
@@ -280,11 +256,21 @@ def train_lora_layoutlmv3(
     (output_dir / "label_map.json").write_text(
         json.dumps(ID2LABEL, indent=2), encoding="utf-8"
     )
-    # Record which group this adapter was trained for
     (output_dir / "adapter_meta.json").write_text(
         json.dumps({"group": group_name, "base_model": "microsoft/layoutlmv3-base"}, indent=2),
         encoding="utf-8",
     )
+
+    # ── Generate plots ────────────────────────────────────────────────────
+    try:
+        generate_training_plots(
+            output_dir,
+            primary_metric="eval_macro_f1",
+            higher_is_better=True,
+            model_label=f"LayoutLMv3 LoRA {group_name}",
+        )
+    except Exception as exc:
+        logger.warning("[LoRA-%s] Plot generation failed: %s", group_name, exc)
 
     logger.info(
         "[LoRA-%s] Done — macro_f1=%.4f  accuracy=%.4f  saved to %s",

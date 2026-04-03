@@ -8,6 +8,9 @@ The vision encoder is frozen entirely (Swin-Transformer weights are expensive
 and transfer well; the decoder is where schema-specific knowledge lives).
 
 Adapter storage: ~6-10 MB per group vs ~200 MB for a full Donut checkpoint.
+
+- Per-epoch CSV log  → <output_dir>/training_log.csv
+- Matplotlib plots   → <output_dir>/plots/
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import torch
 
 from config import DONUT_TASK_PROMPT
 from metrics import compute_cer
+from metrics_logger import EpochCSVLogger, generate_training_plots
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +41,9 @@ def _make_donut_lora_config(group_name: str):
 
     r = 32 if group_name == "group_3" else 16
     return LoraConfig(
-        # SEQ_2_SEQ_LM covers VisionEncoderDecoder when used on the decoder
         task_type="SEQ_2_SEQ_LM",
         r=r,
         lora_alpha=r * 2,
-        # Target decoder self-attn and cross-attn projection matrices
         target_modules=["q_proj", "v_proj", "k_proj", "out_proj"],
         lora_dropout=0.1,
         bias="none",
@@ -50,7 +52,7 @@ def _make_donut_lora_config(group_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Preprocessing  (same as donut_trainer.py)
+# Preprocessing
 # ---------------------------------------------------------------------------
 
 def _preprocess_dataset(dataset, processor, max_length: int):
@@ -109,9 +111,6 @@ def train_lora_donut(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Base model + tokenizer
-    # ------------------------------------------------------------------
     logger.info("[LoRA-Donut-%s] Loading naver-clova-ix/donut-base …", group_name)
     processor = DonutProcessor.from_pretrained("naver-clova-ix/donut-base")
     added     = processor.tokenizer.add_special_tokens(
@@ -127,9 +126,7 @@ def train_lora_donut(
     base_model.config.eos_token_id           = processor.tokenizer.eos_token_id
     base_model.config.max_length             = max_length
 
-    # ------------------------------------------------------------------
     # Freeze encoder, apply LoRA to decoder
-    # ------------------------------------------------------------------
     for param in base_model.encoder.parameters():
         param.requires_grad = False
 
@@ -137,16 +134,10 @@ def train_lora_donut(
     model    = get_peft_model(base_model, lora_cfg)
     model.print_trainable_parameters()
 
-    # ------------------------------------------------------------------
-    # Preprocess
-    # ------------------------------------------------------------------
     logger.info("[LoRA-Donut-%s] Preprocessing splits …", group_name)
     encoded_train = _preprocess_dataset(train_dataset, processor, max_length)
     encoded_val   = _preprocess_dataset(val_dataset,   processor, max_length)
 
-    # ------------------------------------------------------------------
-    # Metrics
-    # ------------------------------------------------------------------
     def compute_metrics(eval_pred):
         pred_ids, label_ids = eval_pred
         label_ids   = np.where(label_ids == -100, processor.tokenizer.pad_token_id, label_ids)
@@ -168,9 +159,9 @@ def train_lora_donut(
             "labels":       torch.stack([f["labels"]       for f in features]),
         }
 
-    # ------------------------------------------------------------------
-    # Training args
-    # ------------------------------------------------------------------
+    # ── CSV + plot callback ───────────────────────────────────────────────
+    csv_logger = EpochCSVLogger(output_dir / "training_log.csv")
+
     args = Seq2SeqTrainingArguments(
         output_dir=str(output_dir / "checkpoints"),
         per_device_train_batch_size=batch_size,
@@ -203,12 +194,9 @@ def train_lora_donut(
         data_collator=collate,
         tokenizer=processor.tokenizer,
         compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=3)],
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=3), csv_logger],
     )
 
-    # ------------------------------------------------------------------
-    # Train + save adapter
-    # ------------------------------------------------------------------
     trainer.train()
     model.save_pretrained(str(output_dir))
     processor.save_pretrained(str(output_dir))
@@ -221,6 +209,17 @@ def train_lora_donut(
         json.dumps({"group": group_name, "base_model": "naver-clova-ix/donut-base"}, indent=2),
         encoding="utf-8",
     )
+
+    # ── Generate plots ────────────────────────────────────────────────────
+    try:
+        generate_training_plots(
+            output_dir,
+            primary_metric="eval_cer",
+            higher_is_better=False,
+            model_label=f"Donut LoRA {group_name}",
+        )
+    except Exception as exc:
+        logger.warning("[LoRA-Donut-%s] Plot generation failed: %s", group_name, exc)
 
     logger.info(
         "[LoRA-Donut-%s] Done — CER=%.4f  exact_match=%.4f",

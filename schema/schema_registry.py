@@ -63,11 +63,21 @@ def _embed_schema(schema: Dict) -> np.ndarray:
     if not sentences:
         sentences = [schema.get("form_name", "unknown schema")]
     emb = _get_embedder().encode(sentences, normalize_embeddings=True)
-    return np.array(emb, dtype=np.float32)
+    emb = np.array(emb, dtype=np.float32)
+    if emb.ndim == 1:
+        emb = emb.reshape(1, -1)
+    return emb
 
 
 def _centroid(emb: np.ndarray) -> np.ndarray:
     """Unit-normalised centroid of a set of embeddings."""
+    emb = np.array(emb, dtype=np.float32)
+    if emb.ndim == 0:
+        emb = emb.reshape(1, 1)
+    elif emb.ndim == 1:
+        emb = emb.reshape(1, -1)
+    if emb.size == 0 or emb.shape[0] == 0:
+        raise ValueError("Cannot compute centroid for empty embedding array")
     c = emb.mean(axis=0)
     norm = np.linalg.norm(c)
     return c / norm if norm > 0 else c
@@ -75,6 +85,12 @@ def _centroid(emb: np.ndarray) -> np.ndarray:
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two unit-norm vectors."""
+    a = np.asarray(a, dtype=np.float32).reshape(-1)
+    b = np.asarray(b, dtype=np.float32).reshape(-1)
+    if a.size == 0 or b.size == 0:
+        raise ValueError("Cannot compute cosine similarity with empty vectors")
+    if a.shape != b.shape:
+        raise ValueError(f"Cosine similarity shape mismatch: {a.shape} vs {b.shape}")
     return float(np.dot(a, b))
 
 
@@ -213,8 +229,9 @@ class SchemaRegistry:
             q_emb = _centroid(_embed_schema(query_schema_or_fields))
         else:
             # Plain field dict — embed field names as sentences
+            field_names = list(query_schema_or_fields.keys()) or ["unknown field"]
             emb = _get_embedder().encode(
-                list(query_schema_or_fields.keys()), normalize_embeddings=True
+                field_names, normalize_embeddings=True
             )
             q_emb = _centroid(np.array(emb, dtype=np.float32))
 
