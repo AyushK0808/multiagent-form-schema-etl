@@ -53,7 +53,7 @@ class DonutExtractor:
         try:
             from transformers import DonutProcessor, VisionEncoderDecoderModel
             logger.info(f"[Donut] Loading {self.model_id} …")
-            self._processor = DonutProcessor.from_pretrained(self.model_id)
+            self._processor = DonutProcessor.from_pretrained(self.model_id, use_fast=False)
             self._model     = VisionEncoderDecoderModel.from_pretrained(self.model_id)
             self._device    = "cuda" if torch.cuda.is_available() else "cpu"
             self._model.to(self._device).eval()

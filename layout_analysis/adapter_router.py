@@ -133,7 +133,7 @@ class AdapterRouter:
 
         logger.info("[AdapterRouter] Loading base model %s …", _BASE_MODEL_ID)
         self._processor = LayoutLMv3Processor.from_pretrained(
-            _BASE_MODEL_ID, apply_ocr=True
+            _BASE_MODEL_ID, apply_ocr=True, use_fast=False
         )
         base = LayoutLMv3ForTokenClassification.from_pretrained(
             _BASE_MODEL_ID,

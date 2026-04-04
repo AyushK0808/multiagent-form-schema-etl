@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
+import re
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional
 
 import fitz
 from PIL import Image
@@ -25,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = ROOT_DIR / "data" / "raw" / "ui_uploads"
 FINETUNE_DIR = ROOT_DIR / "finetune"
+SCHEMA_TRAINING_ROOT = FINETUNE_DIR / "models" / "schema_recognition"
+LORA_TRAINING_ROOT = FINETUNE_DIR / "models" / "adapters"
 
 # ---------------------------------------------------------------------------
 # Dataset metadata  (descriptions + approximate sizes/sample counts)
@@ -408,4 +414,210 @@ def run_training_command(command: List[str]) -> Dict[str, Any]:
         "stdout": result.stdout,
         "stderr": result.stderr,
         "command": " ".join(command),
+    }
+
+
+def expected_training_targets(
+    mode: str,
+    model: str,
+    lora_groups: Optional[Iterable[str]] = None,
+) -> List[Dict[str, Any]]:
+    targets: List[Dict[str, Any]] = []
+    if mode == "full":
+        root = SCHEMA_TRAINING_ROOT
+        if model in ("layoutlmv3", "both"):
+            targets.append({
+                "label": "LayoutLMv3",
+                "path": root / "layoutlmv3",
+                "primary_metric": "eval_macro_f1",
+                "higher_is_better": True,
+            })
+        if model in ("donut", "both"):
+            targets.append({
+                "label": "Donut",
+                "path": root / "donut",
+                "primary_metric": "eval_cer",
+                "higher_is_better": False,
+            })
+        return targets
+
+    groups = list(lora_groups or [])
+    for group in groups:
+        if model in ("layoutlmv3", "both"):
+            targets.append({
+                "label": f"{group} / LayoutLMv3",
+                "path": LORA_TRAINING_ROOT / group / "layoutlmv3",
+                "primary_metric": "eval_macro_f1",
+                "higher_is_better": True,
+            })
+        if model in ("donut", "both"):
+            targets.append({
+                "label": f"{group} / Donut",
+                "path": LORA_TRAINING_ROOT / group / "donut",
+                "primary_metric": "eval_cer",
+                "higher_is_better": False,
+            })
+    return targets
+
+
+class TrainingProcessMonitor:
+    def __init__(self, command: List[str]) -> None:
+        self.command = command
+        self._process: subprocess.Popen[str] | None = None
+        self._stdout_lines: Deque[str] = deque(maxlen=800)
+        self._stderr_lines: Deque[str] = deque(maxlen=400)
+        self._queue: "queue.Queue[tuple[str, str | None]]" = queue.Queue()
+        self._threads: List[threading.Thread] = []
+
+    def start(self) -> "TrainingProcessMonitor":
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        self._process = subprocess.Popen(
+            self.command,
+            cwd=str(FINETUNE_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+        )
+        if self._process.stdout is not None:
+            self._threads.append(threading.Thread(
+                target=self._reader,
+                args=(self._process.stdout, "stdout"),
+                daemon=True,
+            ))
+        if self._process.stderr is not None:
+            self._threads.append(threading.Thread(
+                target=self._reader,
+                args=(self._process.stderr, "stderr"),
+                daemon=True,
+            ))
+        for thread in self._threads:
+            thread.start()
+        return self
+
+    def _reader(self, stream, stream_name: str) -> None:
+        try:
+            for raw_line in iter(stream.readline, ""):
+                line = raw_line.rstrip()
+                self._queue.put((stream_name, line))
+        finally:
+            self._queue.put((stream_name, None))
+
+    def poll(self) -> Optional[int]:
+        if self._process is None:
+            return None
+        self._drain_queue()
+        return self._process.poll()
+
+    def wait(self) -> int:
+        if self._process is None:
+            raise RuntimeError("Training process was not started.")
+        rc = self._process.wait()
+        self._drain_queue(force=True)
+        return rc
+
+    def _drain_queue(self, force: bool = False) -> None:
+        while True:
+            try:
+                stream_name, line = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if line is None:
+                continue
+            if stream_name == "stdout":
+                self._stdout_lines.append(line)
+            else:
+                self._stderr_lines.append(line)
+        if force:
+            for thread in self._threads:
+                thread.join(timeout=0.2)
+
+    def stdout_text(self) -> str:
+        return "\n".join(self._stdout_lines)
+
+    def stderr_text(self) -> str:
+        return "\n".join(self._stderr_lines)
+
+    def combined_tail(self, limit: int = 80) -> str:
+        lines = list(self._stdout_lines) + list(self._stderr_lines)
+        return "\n".join(lines[-limit:])
+
+
+def read_training_csv(csv_path: Path) -> List[Dict[str, Any]]:
+    import csv
+
+    if not csv_path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    with open(csv_path, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            parsed: Dict[str, Any] = {}
+            for key, value in row.items():
+                if value in ("", None):
+                    parsed[key] = None
+                    continue
+                try:
+                    parsed[key] = float(value)
+                except ValueError:
+                    parsed[key] = value
+            rows.append(parsed)
+    return rows
+
+
+def read_json_if_exists(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def infer_current_stage(log_text: str) -> str:
+    lines = [line for line in log_text.splitlines() if line.strip()]
+    if not lines:
+        return "Waiting for first log line"
+
+    latest = lines[-1]
+    patterns = [
+        (r"Loading .* from", "Loading dataset"),
+        (r"Normalize .* train|Normalize .* val", "Normalizing dataset"),
+        (r"Augment .* train", "Augmenting training split"),
+        (r"Preprocessing", "Encoding model inputs"),
+        (r"Starting training", "Training in progress"),
+        (r"epoch=", "Evaluating epoch metrics"),
+        (r"Plots saved to|Saved overview\.png", "Writing training artifacts"),
+        (r"Done", "Run finished"),
+    ]
+    for pattern, label in patterns:
+        if re.search(pattern, latest, re.IGNORECASE):
+            return label
+    return latest
+
+
+def summarize_target_progress(target: Dict[str, Any], epochs: int) -> Dict[str, Any]:
+    csv_rows = read_training_csv(Path(target["path"]) / "training_log.csv")
+    metrics = read_json_if_exists(Path(target["path"]) / "metrics.json")
+    current_epoch = int(max((row.get("epoch") or 0) for row in csv_rows)) if csv_rows else 0
+    done = bool(metrics)
+    progress = min(current_epoch / max(epochs, 1), 1.0)
+    primary_metric = target["primary_metric"]
+    latest_metric = None
+    if csv_rows:
+        latest_metric = csv_rows[-1].get(primary_metric)
+    if latest_metric is None and metrics:
+        latest_metric = metrics.get(primary_metric)
+    return {
+        **target,
+        "csv_rows": csv_rows,
+        "metrics": metrics,
+        "current_epoch": current_epoch,
+        "progress": 1.0 if done else progress,
+        "done": done,
+        "latest_metric": latest_metric,
+        "plots_dir": Path(target["path"]) / "plots",
     }

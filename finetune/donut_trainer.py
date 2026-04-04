@@ -86,7 +86,7 @@ def train_donut(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    processor = DonutProcessor.from_pretrained("naver-clova-ix/donut-base")
+    processor = DonutProcessor.from_pretrained("naver-clova-ix/donut-base", use_fast=False)
     added     = processor.tokenizer.add_special_tokens(
         {"additional_special_tokens": [DONUT_TASK_PROMPT]}
     )
@@ -146,7 +146,7 @@ def train_donut(
         bf16=torch.cuda.is_available(),
         weight_decay=0.01,
         max_grad_norm=1.0,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="cer",
@@ -164,7 +164,7 @@ def train_donut(
         train_dataset=encoded_train,
         eval_dataset=encoded_val,
         data_collator=collate,
-        tokenizer=processor.tokenizer,
+        processing_class=processor.tokenizer,
         compute_metrics=compute_metrics,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3), csv_logger],
     )

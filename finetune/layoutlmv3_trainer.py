@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from collections import Counter
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -115,13 +116,20 @@ def _encode_example(
             return_tensors="pt",
         )
     except Exception as exc:
+        if "tesseract" in str(exc).lower():
+            raise RuntimeError(
+                "LayoutLMv3 preprocessing failed because OCR could not run. "
+                "Install Tesseract OCR and ensure it is on PATH."
+            ) from exc
         logger.debug("Processor failed: %s", exc)
+        fallback_labels = torch.full((max_length,), -100, dtype=torch.long)
+        fallback_labels[0] = LABEL2ID["paragraph"]
         return {
             "input_ids":      torch.zeros(max_length, dtype=torch.long),
             "attention_mask": torch.zeros(max_length, dtype=torch.long),
             "bbox":           torch.zeros((max_length, 4), dtype=torch.long),
             "pixel_values":   torch.zeros((3, 224, 224)),
-            "labels":         torch.full((max_length,), -100, dtype=torch.long),
+            "labels":         fallback_labels,
         }
 
     word_ids   = enc.word_ids(batch_index=0)
@@ -156,6 +164,9 @@ def _encode_example(
 
     token_labels = token_labels[:max_length]
     token_labels += [-100] * (max_length - len(token_labels))
+    if all(label == -100 for label in token_labels):
+        # Keep at least one supervised token so CE/masking does not produce NaN.
+        token_labels[0] = LABEL2ID["paragraph"]
 
     return {
         "input_ids":      enc["input_ids"].squeeze(0),
@@ -175,6 +186,42 @@ def _preprocess_dataset(dataset, processor, max_length: int):
     )
     encoded.set_format("torch")
     return encoded
+
+
+def _log_supervision_stats(encoded_dataset, split_name: str) -> None:
+    label_counts: Counter = Counter()
+    total_tokens = 0
+    supervised_tokens = 0
+    for row in encoded_dataset["labels"]:
+        values = row.tolist() if hasattr(row, "tolist") else row
+        for label in values:
+            total_tokens += 1
+            if label != -100:
+                supervised_tokens += 1
+                label_counts[int(label)] += 1
+
+    ratio = supervised_tokens / max(total_tokens, 1)
+    logger.info(
+        "[LayoutLMv3] %s supervised tokens: %d/%d (%.2f%%) | class_counts=%s",
+        split_name,
+        supervised_tokens,
+        total_tokens,
+        ratio * 100.0,
+        dict(sorted(label_counts.items())),
+    )
+    if not label_counts:
+        logger.warning(
+            "[LayoutLMv3] %s has no supervised tokens (all labels are -100).",
+            split_name,
+        )
+    elif len(label_counts) == 1:
+        only_label_id = next(iter(label_counts))
+        label_name = ID2LABEL.get(only_label_id, str(only_label_id))
+        logger.warning(
+            "[LayoutLMv3] %s is single-class only (%s). Metrics may look artificially perfect.",
+            split_name,
+            label_name,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +251,7 @@ def train_layoutlmv3(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     processor = LayoutLMv3Processor.from_pretrained(
-        "microsoft/layoutlmv3-base", apply_ocr=True
+        "microsoft/layoutlmv3-base", apply_ocr=True, use_fast=False
     )
     model = LayoutLMv3ForTokenClassification.from_pretrained(
         "microsoft/layoutlmv3-base",
@@ -216,8 +263,10 @@ def train_layoutlmv3(
 
     logger.info("[LayoutLMv3] Preprocessing train split …")
     encoded_train = _preprocess_dataset(train_dataset, processor, max_length)
+    _log_supervision_stats(encoded_train, "train")
     logger.info("[LayoutLMv3] Preprocessing val split …")
     encoded_val   = _preprocess_dataset(val_dataset, processor, max_length)
+    _log_supervision_stats(encoded_val, "validation")
 
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
@@ -225,6 +274,8 @@ def train_layoutlmv3(
         labels = labels.flatten()
         mask   = labels != -100
         preds, labels = preds[mask], labels[mask]
+        if labels.size == 0:
+            return {"macro_f1": 0.0, "accuracy": 0.0}
         return {
             "macro_f1": round(f1_score(labels, preds, average="macro", zero_division=0), 4),
             "accuracy": round(float((preds == labels).mean()), 4),
@@ -251,7 +302,7 @@ def train_layoutlmv3(
         fp16=False,
         weight_decay=0.01,
         max_grad_norm=1.0,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="macro_f1",
@@ -267,7 +318,7 @@ def train_layoutlmv3(
         train_dataset=encoded_train,
         eval_dataset=encoded_val,
         compute_metrics=compute_metrics,
-        tokenizer=processor,
+        processing_class=processor,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=3), csv_logger],
     )
 

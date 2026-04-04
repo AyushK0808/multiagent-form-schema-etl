@@ -36,6 +36,7 @@ from adapter_groups import ADAPTER_GROUPS, AdapterGroupSpec
 from augmentation import augmentation_available
 from config import DATASET_SPECS
 from data_loader import build_combined_dataset
+from label_spaces import build_group_label_space, log_dataset_label_distribution
 from lora_layoutlmv3_trainer import train_lora_layoutlmv3
 
 # Donut adapter training reuses the same Seq2Seq trainer but with LoRA
@@ -144,7 +145,7 @@ def _train_group(
     logger.info("[%s] Training on: %s", grp.name, available)
 
     # Build combined dataset for this group (curriculum order within the group)
-    train_ds, val_ds, label2id, id2label, manifest = build_combined_dataset(
+    train_ds, val_ds, _, _, manifest = build_combined_dataset(
         dataset_names=available,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
@@ -155,6 +156,10 @@ def _train_group(
         augment_train=augment,
         curriculum=True,
     )
+    label2id, id2label = build_group_label_space(available, train_ds, val_ds)
+    log_dataset_label_distribution(train_ds, "train", grp.name)
+    log_dataset_label_distribution(val_ds, "validation", grp.name)
+    logger.info("[%s] Token label space: %s", grp.name, label2id)
 
     group_output = args.output_root / grp.name
 
@@ -189,6 +194,8 @@ def _train_group(
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
             max_length=args.max_length,
+            label2id=label2id,
+            id2label=id2label,
         )
 
     # Donut adapter

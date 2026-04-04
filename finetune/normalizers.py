@@ -7,32 +7,31 @@ unified intermediate dict:
     {
         "image"        : PIL.Image,
         "segments"     : [{"bbox": [x0,y0,x1,y1] in 0-1000, "label": str}],
-        "label_text"   : str,   # Donut schema target
+        "label_text"   : str,
         "dataset_name" : str,
     }
-
-Word-level datasets (FUNSD, DocBank, Kleister-NDA) express each annotated
-word as a tiny 1-word segment so the same containment algorithm in metrics.py
-works for both word-level and region-level annotations.
 """
 from __future__ import annotations
 
 import io
+import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List
 
 from PIL import Image
 
 from config import DatasetSpec
-from dataset_maps import DOCLAYNET_MAP, DOCBANK_MAP, FUNSD_MAP, PUBLAYNET_MAP
+from dataset_maps import DOCLAYNET_MAP, DOCBANK_MAP, PUBLAYNET_MAP
+from dataset_mappings.cord import cord_layout_label, cord_parse_ground_truth, cord_word_bbox
+from dataset_mappings.doclaynet import doclaynet_category_name
+from dataset_mappings.funsd import funsd_ner_tag_to_label, funsd_word_bio_label
+from dataset_mappings.rvl_cdip import rvl_cdip_label_name
 from metrics import norm_bbox
 
 logger = logging.getLogger(__name__)
 
+NORMALIZATION_VERSION = 7
 
-# ---------------------------------------------------------------------------
-# Image loading
-# ---------------------------------------------------------------------------
 
 def _open_image(value: Any) -> Image.Image:
     if value is None:
@@ -49,21 +48,127 @@ def _open_image(value: Any) -> Image.Image:
     raise ValueError(f"Unsupported image payload: {type(value)}")
 
 
-# ---------------------------------------------------------------------------
-# Per-dataset normalizers
-# ---------------------------------------------------------------------------
+def _coerce_bbox(bbox: Any, width: int, height: int) -> List[int]:
+    if not bbox:
+        return [0, 0, width, height]
+    if isinstance(bbox, dict):
+        if all(k in bbox for k in ("x0", "y0", "x1", "y1")):
+            return [bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"]]
+        if all(k in bbox for k in ("left", "top", "right", "bottom")):
+            return [bbox["left"], bbox["top"], bbox["right"], bbox["bottom"]]
+        if all(k in bbox for k in ("x", "y", "w", "h")):
+            return [bbox["x"], bbox["y"], bbox["x"] + bbox["w"], bbox["y"] + bbox["h"]]
+        if all(k in bbox for k in ("x", "y", "width", "height")):
+            return [bbox["x"], bbox["y"], bbox["x"] + bbox["width"], bbox["y"] + bbox["height"]]
+    if isinstance(bbox, (list, tuple)):
+        vals = list(bbox)
+        if len(vals) >= 4:
+            x0, y0, x1, y1 = vals[:4]
+            if x1 <= x0 or y1 <= y0:
+                return [x0, y0, x0 + x1, y0 + y1]
+            return [x0, y0, x1, y1]
+    return [0, 0, width, height]
+
+
+def _extract_segments_from_words(words: Iterable[Any], width: int, height: int, label: str) -> List[Dict]:
+    segments: List[Dict] = []
+    for word in words:
+        bbox = None
+        if isinstance(word, dict):
+            bbox = word.get("bbox") or word.get("box") or word.get("bounding_box")
+        elif isinstance(word, (list, tuple)) and len(word) >= 4:
+            bbox = word
+        if bbox is None:
+            continue
+        segments.append({
+            "bbox": norm_bbox(_coerce_bbox(bbox, width, height), width, height),
+            "label": label,
+        })
+    return segments
+
 
 def normalize_funsd(example: Dict) -> Dict:
     image = _open_image(example.get("image") or example.get("img"))
     w, h = image.size
     segments = []
+
+    # Current HF parquet format (nielsr/funsd): token-level fields.
+    # keys: words, bboxes, ner_tags, image
+    bboxes = example.get("bboxes") or []
+    ner_tags = example.get("ner_tags") or []
+    if bboxes and ner_tags:
+        for bbox, tag in zip(bboxes, ner_tags):
+            segments.append(
+                {
+                    "bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h),
+                    "label": funsd_ner_tag_to_label(tag),
+                }
+            )
+        return {"image": image, "segments": segments, "label_text": "funsd_form", "dataset_name": "FUNSD"}
+
+    # Legacy FUNSD-style format fallback (form -> words -> box + entity label)
     for entity in example.get("form", []):
-        mapped = FUNSD_MAP.get(entity.get("label", "other"), "other")
-        for word in entity.get("words", []):
+        raw_label = entity.get("label", "other")
+        for word_index, word in enumerate(entity.get("words", [])):
             bbox = word.get("box", [0, 0, w, h])
-            segments.append({"bbox": norm_bbox(bbox, w, h), "label": mapped})
-    return {"image": image, "segments": segments,
-            "label_text": "funsd_form", "dataset_name": "FUNSD"}
+            segments.append(
+                {
+                    "bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h),
+                    "label": funsd_word_bio_label(raw_label, word_index),
+                }
+            )
+    return {"image": image, "segments": segments, "label_text": "funsd_form", "dataset_name": "FUNSD"}
+
+
+def normalize_cord(example: Dict) -> Dict:
+    image = _open_image(example.get("image") or example.get("img"))
+    w, h = image.size
+    segments = []
+    gt_parse = cord_parse_ground_truth(example.get("ground_truth"))
+
+    def visit(node: Any, path: List[str]) -> None:
+        if isinstance(node, dict):
+            words = node.get("words")
+            if isinstance(words, list):
+                mapped = cord_layout_label(path)
+                for word in words:
+                    bbox = cord_word_bbox(word)
+                    if bbox is None:
+                        continue
+                    segments.append(
+                        {
+                            "bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h),
+                            "label": mapped,
+                        }
+                    )
+            for key, value in node.items():
+                if key == "words":
+                    continue
+                visit(value, path + [str(key)])
+        elif isinstance(node, list):
+            for item in node:
+                visit(item, path)
+
+    visit(gt_parse, [])
+    return {"image": image, "segments": segments, "label_text": "cord_receipt", "dataset_name": "CORD"}
+
+
+def normalize_sroie(example: Dict) -> Dict:
+    image = _open_image(example.get("image") or example.get("img"))
+    w, h = image.size
+    segments = []
+    for ann in example.get("ocr") or example.get("words") or example.get("annotations") or []:
+        if not isinstance(ann, dict):
+            continue
+        bbox = ann.get("bbox") or ann.get("box") or ann.get("points")
+        if bbox is None:
+            continue
+        text = str(ann.get("text", "")).lower()
+        label = "paragraph"
+        if any(token in text for token in ("invoice", "receipt", "tax", "total", "amount")):
+            label = "heading"
+        segments.append({"bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h), "label": label})
+    return {"image": image, "segments": segments, "label_text": "sroie_invoice", "dataset_name": "SROIE"}
 
 
 def normalize_publaynet(example: Dict) -> Dict:
@@ -71,58 +176,120 @@ def normalize_publaynet(example: Dict) -> Dict:
     w, h = image.size
     objects = example.get("objects", {})
     cat_ids = objects.get("category", [])
-    bboxes  = objects.get("bbox", [])   # COCO [x, y, width, height]
+    bboxes = objects.get("bbox", [])
     segments = []
     for cat_id, bbox in zip(cat_ids, bboxes):
         label = PUBLAYNET_MAP.get(int(cat_id), "other")
         x, y, bw, bh = bbox
         segments.append({"bbox": norm_bbox([x, y, x + bw, y + bh], w, h), "label": label})
-    return {"image": image, "segments": segments,
-            "label_text": "publaynet_layout", "dataset_name": "PUBLAYNET"}
+    return {"image": image, "segments": segments, "label_text": "publaynet_layout", "dataset_name": "PUBLAYNET"}
 
 
 def normalize_doclaynet(example: Dict) -> Dict:
     image = _open_image(example.get("image"))
     w, h = image.size
     segments = []
-    for ann in example.get("annotations", []):
-        cat_name = ann.get("category_name", "Text")
-        label    = DOCLAYNET_MAP.get(cat_name, "other")
-        bbox     = ann.get("bbox", [0, 0, w, h])
-        x, y, bw, bh = bbox[:4]
-        segments.append({"bbox": norm_bbox([x, y, x + bw, y + bh], w, h), "label": label})
-    return {"image": image, "segments": segments,
-            "label_text": "doclaynet_layout", "dataset_name": "DOCLAYNET"}
+
+    # Format A: annotation objects
+    annotations = example.get("annotations", [])
+    if annotations:
+        for ann in annotations:
+            cat_name = ann.get("category_name", "Text")
+            label = DOCLAYNET_MAP.get(cat_name, "other")
+            bbox = ann.get("bbox", [0, 0, w, h])
+            x, y, bw, bh = bbox[:4]
+            segments.append({"bbox": norm_bbox([x, y, x + bw, y + bh], w, h), "label": label})
+        return {"image": image, "segments": segments, "label_text": "doclaynet_layout", "dataset_name": "DOCLAYNET"}
+
+    # Format B: parallel arrays from docling-project/DocLayNet-v1.2
+    category_ids = example.get("category_id", [])
+    bboxes = example.get("bboxes", [])
+    for cat_id, bbox in zip(category_ids, bboxes):
+        cat_name = doclaynet_category_name(cat_id)
+        label = DOCLAYNET_MAP.get(cat_name, "other")
+        x0, y0, x1, y1 = _coerce_bbox(bbox, w, h)
+        segments.append({"bbox": norm_bbox([x0, y0, x1, y1], w, h), "label": label})
+    return {"image": image, "segments": segments, "label_text": "doclaynet_layout", "dataset_name": "DOCLAYNET"}
 
 
 def normalize_docbank(example: Dict) -> Dict:
     image = _open_image(example.get("image"))
     w, h = image.size
-    tokens     = example.get("tokens", [])
-    raw_labels = example.get("labels", ["paragraph"] * len(tokens))
-    bboxes     = example.get("bboxes", [[0, 0, w, h]] * len(tokens))
-    segments   = []
-    for _, raw_label, bbox in zip(tokens, raw_labels, bboxes):
+    raw_labels = example.get("labels", [])
+    bboxes = example.get("bboxes", [[0, 0, w, h]] * len(raw_labels))
+    segments = []
+    for raw_label, bbox in zip(raw_labels, bboxes):
         label = DOCBANK_MAP.get(str(raw_label).lower(), "other")
         segments.append({"bbox": norm_bbox(bbox, w, h), "label": label})
-    return {"image": image, "segments": segments,
-            "label_text": "docbank_layout", "dataset_name": "DOCBANK"}
+    return {"image": image, "segments": segments, "label_text": "docbank_layout", "dataset_name": "DOCBANK"}
+
+
+def normalize_docvqa(example: Dict) -> Dict:
+    image = _open_image(example.get("image") or example.get("img") or example.get("document") or example.get("page_image"))
+    w, h = image.size
+    segments = []
+    for token in example.get("ocr_info") or example.get("ocr_tokens") or []:
+        if not isinstance(token, dict):
+            continue
+        bbox = token.get("bbox") or token.get("box")
+        if bbox is None:
+            continue
+        segments.append({"bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h), "label": "paragraph"})
+    return {"image": image, "segments": segments, "label_text": "docvqa_reasoning", "dataset_name": "DOCVQA"}
 
 
 def normalize_kleister_nda(example: Dict) -> Dict:
-    """
-    Kleister-NDA has token-level NER tags but no layout bboxes.
-    Empty segments → containment falls back to 'paragraph' for all tokens,
-    which is correct (NDA clauses are body text; heading detection happens
-    at inference via the production heuristic analyser).
-    """
     image = _open_image(example.get("image") or example.get("img"))
-    return {"image": image, "segments": [],
-            "label_text": "kleister_nda", "dataset_name": "KLEISTER_NDA"}
+    return {"image": image, "segments": [], "label_text": "kleister_nda", "dataset_name": "KLEISTER_NDA"}
+
+
+def normalize_rvl_cdip(example: Dict) -> Dict:
+    image = _open_image(example.get("image") or example.get("img"))
+    w, h = image.size
+    raw_label = example.get("label", example.get("labels"))
+    class_name = rvl_cdip_label_name(raw_label)
+    # RVL-CDIP is document-level classification, so assign a full-page segment.
+    segments = [{"bbox": norm_bbox([0, 0, w, h], w, h), "label": class_name}]
+    return {"image": image, "segments": segments, "label_text": class_name, "dataset_name": "RVL-CDIP"}
+
+
+def normalize_infographicvqa(example: Dict) -> Dict:
+    image = _open_image(example.get("image") or example.get("img") or example.get("document") or example.get("page_image"))
+    w, h = image.size
+    segments = []
+    for token in example.get("ocr_tokens") or example.get("ocr_info") or example.get("words") or []:
+        if not isinstance(token, dict):
+            continue
+        bbox = token.get("bbox") or token.get("box")
+        if bbox is None:
+            continue
+        segments.append({"bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h), "label": "paragraph"})
+    return {"image": image, "segments": segments, "label_text": "infographic_vqa", "dataset_name": "INFOGRAPHICVQA"}
+
+
+def normalize_synthdog_en(example: Dict) -> Dict:
+    image = _open_image(example.get("image") or example.get("img"))
+    w, h = image.size
+    segments = []
+    for token in example.get("words") or example.get("ocr_tokens") or example.get("tokens") or example.get("annotations") or []:
+        if not isinstance(token, dict):
+            continue
+        bbox = token.get("bbox") or token.get("box") or token.get("bounding_box")
+        if bbox is None:
+            continue
+        raw_label = str(token.get("label") or token.get("type") or "paragraph").lower()
+        label = "paragraph"
+        if any(mark in raw_label for mark in ("title", "header", "heading")):
+            label = "heading"
+        elif any(mark in raw_label for mark in ("table", "cell")):
+            label = "table"
+        elif any(mark in raw_label for mark in ("list", "item", "bullet")):
+            label = "list_item"
+        segments.append({"bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h), "label": label})
+    return {"image": image, "segments": segments, "label_text": "synthdog_ocr", "dataset_name": "SYNTHDOG_EN"}
 
 
 def normalize_generic(example: Dict, spec: DatasetSpec) -> Dict:
-    """Fallback for datasets with no layout annotations (RVL-CDIP, QA datasets)."""
     for key in ("image", "img", "document", "page_image"):
         if example.get(key) is not None:
             image = _open_image(example[key])
@@ -130,18 +297,19 @@ def normalize_generic(example: Dict, spec: DatasetSpec) -> Dict:
     else:
         raise KeyError(f"No image field found. Keys: {list(example.keys())}")
     label_text = spec.schema_name or spec.name.lower()
-    return {"image": image, "segments": [],
-            "label_text": label_text, "dataset_name": spec.name}
+    return {"image": image, "segments": [], "label_text": label_text, "dataset_name": spec.name}
 
-
-# ---------------------------------------------------------------------------
-# Dispatch table
-# ---------------------------------------------------------------------------
 
 NORMALIZERS = {
-    "FUNSD":        normalize_funsd,
-    "PUBLAYNET":    normalize_publaynet,
-    "DOCLAYNET":    normalize_doclaynet,
-    "DOCBANK":      normalize_docbank,
+    "CORD": normalize_cord,
+    "DOCBANK": normalize_docbank,
+    "DOCLAYNET": normalize_doclaynet,
+    "DOCVQA": normalize_docvqa,
+    "FUNSD": normalize_funsd,
+    "INFOGRAPHICVQA": normalize_infographicvqa,
     "KLEISTER_NDA": normalize_kleister_nda,
+    "PUBLAYNET": normalize_publaynet,
+    "RVL-CDIP": normalize_rvl_cdip,
+    "SROIE": normalize_sroie,
+    "SYNTHDOG_EN": normalize_synthdog_en,
 }

@@ -58,6 +58,8 @@ def norm_bbox(bbox: List[float], img_w: int, img_h: int) -> List[int]:
 def assign_labels_by_containment(
     word_bboxes_norm: List[Tuple[int, int, int, int]],   # 0-1000 scale
     segments_norm: List[Dict],                            # [{bbox: 0-1000, label: str}]
+    label2id: Dict[str, int] | None = None,
+    background_label: str = "other",
 ) -> List[int]:
     """
     For each OCR word (given by its normalised bbox), find the first annotated
@@ -67,15 +69,27 @@ def assign_labels_by_containment(
     This is the unified label-assignment algorithm for both word-level datasets
     (FUNSD, DocBank) and region-level datasets (PubLayNet, DocLayNet).
     """
+    if label2id is None:
+        label2id = LABEL2ID
+
+    if background_label in label2id:
+        background_id = label2id[background_label]
+    elif "O" in label2id:
+        background_id = label2id["O"]
+    elif "paragraph" in label2id:
+        background_id = label2id["paragraph"]
+    else:
+        background_id = next(iter(label2id.values()))
+
     result = []
     for wb in word_bboxes_norm:
         cx = (wb[0] + wb[2]) / 2.0
         cy = (wb[1] + wb[3]) / 2.0
-        label_id = LABEL2ID["other"]
+        label_id = background_id
         for seg in segments_norm:
             sx0, sy0, sx1, sy1 = seg["bbox"]
             if sx0 <= cx <= sx1 and sy0 <= cy <= sy1:
-                label_id = LABEL2ID.get(seg["label"], LABEL2ID["other"])
+                label_id = label2id.get(seg["label"], background_id)
                 break
         result.append(label_id)
     return result

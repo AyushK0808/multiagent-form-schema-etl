@@ -12,20 +12,15 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 
-from augmentation import augment_image
+from augmentation import AUGMENTATION_VERSION, AUGMENTORS, augment_image
 from config import DATASET_SPECS, DatasetSpec
-from normalizers import NORMALIZERS, normalize_generic
+from normalizers import NORMALIZATION_VERSION, NORMALIZERS, normalize_generic
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# HuggingFace authentication — load .env from project root if present
-# ---------------------------------------------------------------------------
-
 def _hf_login() -> None:
     """Authenticate with the HF Hub using HF_TOKEN from the environment or .env."""
-    # Walk up from finetune/ to find .env at the project root
     env_path = Path(__file__).parent.parent / ".env"
     if env_path.exists():
         try:
@@ -38,7 +33,7 @@ def _hf_login() -> None:
     token = os.getenv("HF_TOKEN")
     if not token:
         logger.warning(
-            "[HF] HF_TOKEN not set — gated datasets will return 401. "
+            "[HF] HF_TOKEN not set - gated datasets will return 401. "
             "Add HF_TOKEN=<your_token> to .env or the environment."
         )
         return
@@ -54,9 +49,19 @@ def _hf_login() -> None:
 _hf_login()
 
 
-# ---------------------------------------------------------------------------
-# Single-dataset loader
-# ---------------------------------------------------------------------------
+def _handler_name(func, fallback: str) -> str:
+    return getattr(func, "__name__", fallback)
+
+
+def _cache_manifest_matches(manifest_path: Optional[Path], version: int, handler_name: str) -> bool:
+    if manifest_path is None or not manifest_path.exists():
+        return False
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return payload.get("version") == version and payload.get("handler_name") == handler_name
+
 
 def _load_single_dataset(
     spec: DatasetSpec,
@@ -72,18 +77,36 @@ def _load_single_dataset(
 
     logger.info("[DataLoader] Loading %s from %s", spec.name, spec.repo_id)
 
+    norm_fn = NORMALIZERS.get(spec.name)
+    augment_fn = AUGMENTORS.get(spec.name)
+    norm_name = _handler_name(norm_fn, "normalize_generic")
+    augment_name = _handler_name(augment_fn, "augment_identity")
+
     cache_base = None
     train_cache_dir = None
     val_cache_dir = None
+    normalized_manifest = None
     augmented_cache_base = None
     augmented_train_cache_dir = None
+    augmented_manifest = None
+
     if normalized_cache_root is not None:
         cache_base = normalized_cache_root / spec.name.lower()
         train_cache_dir = cache_base / "train"
         val_cache_dir = cache_base / "validation"
+        normalized_manifest = cache_base / "manifest.json"
     if augmented_cache_root is not None:
         augmented_cache_base = augmented_cache_root / spec.name.lower()
         augmented_train_cache_dir = augmented_cache_base / "train"
+        augmented_manifest = augmented_cache_base / "manifest.json"
+
+    normalized_cache_ok = _cache_manifest_matches(
+        normalized_manifest, NORMALIZATION_VERSION, norm_name
+    )
+    augmented_cache_ok = _cache_manifest_matches(
+        augmented_manifest, AUGMENTATION_VERSION, augment_name
+    )
+
     if (
         augment_train
         and augmented_train_cache_dir is not None
@@ -91,6 +114,8 @@ def _load_single_dataset(
         and augmented_train_cache_dir.exists()
         and val_cache_dir is not None
         and val_cache_dir.exists()
+        and augmented_cache_ok
+        and normalized_cache_ok
     ):
         logger.info("[DataLoader] Reusing augmented cache for %s", spec.name)
         train_ds = load_from_disk(str(augmented_train_cache_dir))
@@ -100,12 +125,14 @@ def _load_single_dataset(
         if max_val_samples:
             val_ds = val_ds.select(range(min(max_val_samples, len(val_ds))))
         return train_ds, val_ds
+
     if (
         not refresh_normalized_cache
         and train_cache_dir is not None
         and val_cache_dir is not None
         and train_cache_dir.exists()
         and val_cache_dir.exists()
+        and normalized_cache_ok
     ):
         logger.info("[DataLoader] Reusing normalized cache for %s", spec.name)
         train_ds = load_from_disk(str(train_cache_dir))
@@ -133,50 +160,41 @@ def _load_single_dataset(
     try:
         ds = load_dataset(spec.repo_id, **load_kwargs)
     except Exception as exc:
-        logger.warning("[DataLoader] Could not load %s: %s — skipping", spec.name, exc)
+        logger.warning("[DataLoader] Could not load %s: %s - skipping", spec.name, exc)
         return None, None
 
-    # Standardise splits
     if "train" not in ds:
         only = next(iter(ds.keys()))
         sp = ds[only].train_test_split(test_size=0.1, seed=42)
         ds = {"train": sp["train"], "validation": sp["test"]}
     else:
-        val_key = next(
-            (n for n in ("validation", "val", "dev", "test") if n in ds), None
-        )
+        val_key = next((n for n in ("validation", "val", "dev", "test") if n in ds), None)
         if val_key is None:
             sp = ds["train"].train_test_split(test_size=0.1, seed=42)
             ds = {"train": sp["train"], "validation": sp["test"]}
         else:
             ds = {"train": ds["train"], "validation": ds[val_key]}
 
-    norm_fn = NORMALIZERS.get(spec.name)
-
     def normalize(example: Dict) -> Dict:
         try:
-            result = norm_fn(example) if norm_fn else normalize_generic(example, spec)
+            return norm_fn(example) if norm_fn else normalize_generic(example, spec)
         except Exception as exc:
             logger.debug("[DataLoader] Normalize error (%s): %s", spec.name, exc)
-            result = {
-                "image":        Image.new("RGB", (224, 224)),
-                "segments":     [],
-                "label_text":   spec.schema_name or spec.name.lower(),
+            return {
+                "image": Image.new("RGB", (224, 224)),
+                "segments": [],
+                "label_text": spec.schema_name or spec.name.lower(),
                 "dataset_name": spec.name,
             }
-        return result
 
-    train_ds = ds["train"]
-    val_ds   = ds["validation"]
-
-    train_ds = train_ds.map(
+    train_ds = ds["train"].map(
         normalize,
-        remove_columns=train_ds.column_names,
+        remove_columns=ds["train"].column_names,
         desc=f"Normalize {spec.name} train",
     )
-    val_ds = val_ds.map(
+    val_ds = ds["validation"].map(
         normalize,
-        remove_columns=val_ds.column_names,
+        remove_columns=ds["validation"].column_names,
         desc=f"Normalize {spec.name} val",
     )
 
@@ -185,10 +203,12 @@ def _load_single_dataset(
         logger.info("[DataLoader] Saving normalized cache for %s to %s", spec.name, cache_base)
         train_ds.save_to_disk(str(train_cache_dir))
         val_ds.save_to_disk(str(val_cache_dir))
-        (cache_base / "manifest.json").write_text(
+        normalized_manifest.write_text(
             json.dumps(
                 {
                     **asdict(spec),
+                    "version": NORMALIZATION_VERSION,
+                    "handler_name": norm_name,
                     "train_examples": len(train_ds),
                     "validation_examples": len(val_ds),
                 },
@@ -213,7 +233,7 @@ def _load_single_dataset(
 
 
 def _augment_normalized_example(example: Dict) -> Dict:
-    example["image"] = augment_image(example["image"])
+    example["image"] = augment_image(example["image"], example.get("dataset_name", ""))
     return example
 
 
@@ -226,10 +246,14 @@ def _maybe_augment_and_cache(
 ):
     from datasets import load_from_disk
 
+    augment_name = _handler_name(AUGMENTORS.get(spec.name), "augment_identity")
+    manifest_path = augmented_cache_base / "manifest.json" if augmented_cache_base is not None else None
+
     if (
         augmented_train_cache_dir is not None
         and not refresh_augmented_cache
         and augmented_train_cache_dir.exists()
+        and _cache_manifest_matches(manifest_path, AUGMENTATION_VERSION, augment_name)
     ):
         logger.info("[DataLoader] Reusing augmented cache for %s", spec.name)
         return load_from_disk(str(augmented_train_cache_dir))
@@ -241,16 +265,14 @@ def _maybe_augment_and_cache(
     )
     if augmented_cache_base is not None and augmented_train_cache_dir is not None:
         augmented_cache_base.mkdir(parents=True, exist_ok=True)
-        logger.info(
-            "[DataLoader] Saving augmented cache for %s to %s",
-            spec.name,
-            augmented_cache_base,
-        )
+        logger.info("[DataLoader] Saving augmented cache for %s to %s", spec.name, augmented_cache_base)
         augmented_train_ds.save_to_disk(str(augmented_train_cache_dir))
-        (augmented_cache_base / "manifest.json").write_text(
+        manifest_path.write_text(
             json.dumps(
                 {
                     **asdict(spec),
+                    "version": AUGMENTATION_VERSION,
+                    "handler_name": augment_name,
                     "train_examples": len(augmented_train_ds),
                     "source": "normalized_train_split",
                 },
@@ -260,10 +282,6 @@ def _maybe_augment_and_cache(
         )
     return augmented_train_ds
 
-
-# ---------------------------------------------------------------------------
-# Combined loader  (unchanged from original)
-# ---------------------------------------------------------------------------
 
 def build_combined_dataset(
     dataset_names: List[str],
@@ -300,22 +318,20 @@ def build_combined_dataset(
         val_parts.append(val_ds)
         manifest.append({
             **asdict(spec),
-            "train_examples":      len(train_ds),
+            "normalizer": _handler_name(NORMALIZERS.get(spec.name), "normalize_generic"),
+            "augmentor": _handler_name(AUGMENTORS.get(spec.name), "augment_identity"),
+            "train_examples": len(train_ds),
             "validation_examples": len(val_ds),
         })
 
     if not train_parts:
-        raise RuntimeError(
-            "No datasets could be loaded — check dataset IDs and network access."
-        )
+        raise RuntimeError("No datasets could be loaded - check dataset IDs and network access.")
 
     train_dataset = concatenate_datasets(train_parts)
-    val_dataset   = concatenate_datasets(val_parts)
+    val_dataset = concatenate_datasets(val_parts)
 
-    label_texts = sorted(
-        set(train_dataset["label_text"]) | set(val_dataset["label_text"])
-    )
-    label2id = {l: i for i, l in enumerate(label_texts)}
-    id2label = {i: l for l, i in label2id.items()}
+    label_texts = sorted(set(train_dataset["label_text"]) | set(val_dataset["label_text"]))
+    label2id = {label: i for i, label in enumerate(label_texts)}
+    id2label = {i: label for label, i in label2id.items()}
 
     return train_dataset, val_dataset, label2id, id2label, manifest

@@ -59,7 +59,11 @@ class LayoutLMv3SchemaRecognizer:
 
         model_source, using_fallback = _select_model_source(self.checkpoint_path, self.fallback_model)
         self.using_fallback = using_fallback
-        self.processor = LayoutLMv3Processor.from_pretrained(model_source, apply_ocr=True)
+        self.processor = LayoutLMv3Processor.from_pretrained(
+            model_source,
+            apply_ocr=True,
+            use_fast=False,
+        )
         self.model = LayoutLMv3ForSequenceClassification.from_pretrained(model_source)
         self.model.to(self.device).eval()
 
@@ -103,7 +107,7 @@ class DonutSchemaRecognizer:
 
         model_source, using_fallback = _select_model_source(self.checkpoint_path, self.fallback_model)
         self.using_fallback = using_fallback
-        self.processor = DonutProcessor.from_pretrained(model_source)
+        self.processor = DonutProcessor.from_pretrained(model_source, use_fast=False)
         self.model = VisionEncoderDecoderModel.from_pretrained(model_source)
         self.model.to(self.device).eval()
 

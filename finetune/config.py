@@ -53,18 +53,19 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
         name="CORD", repo_id="naver-clova-ix/cord-v2",
         schema_name="cord_receipt", description="Receipts",
         annotation_type="segment", curriculum_order=1,
+        config_name="cord-v2",
     ),
     "SROIE": DatasetSpec(
         name="SROIE", repo_id="rth/sroie-2019-v2",
         schema_name="sroie_invoice", description="Invoices",
         annotation_type="segment", curriculum_order=2,
     ),
-    "DOCVQA": DatasetSpec(
-    name="DOCVQA", repo_id="lmms-lab/DocVQA",
-    schema_name="docvqa_reasoning", description="Document reasoning",
-    annotation_type="qa", curriculum_order=4,
-    config_name="DocVQA",          # ← fix: was missing config name
-),
+#     "DOCVQA": DatasetSpec(
+#     name="DOCVQA", repo_id="lmms-lab/DocVQA",
+#     schema_name="docvqa_reasoning", description="Document reasoning",
+#     annotation_type="qa", curriculum_order=4,
+#     config_name="DocVQA",          # ← fix: was missing config name
+# ),
 "RVL-CDIP": DatasetSpec(
     name="RVL-CDIP", repo_id="hf-tuner/rvl-cdip-document-classification",
     schema_name=None, description="Document diversity",

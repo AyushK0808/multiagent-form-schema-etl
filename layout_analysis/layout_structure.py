@@ -160,7 +160,11 @@ class FineTunedLayoutAnalyzer:
         from transformers import LayoutLMv3Processor, LayoutLMv3ForTokenClassification
 
         logger.info("[LayoutLMv3] Loading fine-tuned model from: %s", model_path)
-        self.processor = LayoutLMv3Processor.from_pretrained(model_path, apply_ocr=False)
+        self.processor = LayoutLMv3Processor.from_pretrained(
+            model_path,
+            apply_ocr=True,
+            use_fast=False,
+        )
         self.model = LayoutLMv3ForTokenClassification.from_pretrained(
             model_path,
             num_labels=len(LABEL2ID),
