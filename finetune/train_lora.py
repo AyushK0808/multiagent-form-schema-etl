@@ -93,13 +93,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refresh-augmented-cache", action="store_true")
     parser.add_argument("--epochs",        type=int,   default=10)
     parser.add_argument("--batch-size",    type=int,   default=2)
-    parser.add_argument("--learning-rate", type=float, default=3e-4,
+    parser.add_argument("--learning-rate", type=float, default=5e-5,
                         help="Higher than full fine-tune is fine; only adapters update")
     parser.add_argument("--max-length",    type=int,   default=512)
     parser.add_argument("--max-train-samples", type=int,
                         help="Cap per-dataset training samples (debug)")
     parser.add_argument("--max-val-samples",   type=int)
     parser.add_argument("--no-augment",    action="store_true")
+    parser.add_argument(
+        "--hf-native",
+        nargs="+",
+        metavar="DATASET_NAME",
+        default=None,
+        help=(
+            "Use pre-tokenized HuggingFace datasets for the listed datasets instead of "
+            "the segment-containment path. Supported: FUNSD, CORD. "
+            "Example: --hf-native FUNSD CORD"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -185,6 +196,13 @@ def _train_group(
     if args.model in ("layoutlmv3", "both"):
         lm_out = group_output / "layoutlmv3"
         logger.info("[%s] Training LayoutLMv3 LoRA adapter → %s", grp.name, lm_out)
+        # Determine which datasets in this group use the HF-native path
+        hf_native = (
+            [d for d in available if d in (args.hf_native or [])]
+            or None
+        )
+        if hf_native:
+            logger.info("[%s] HF-native datasets: %s", grp.name, hf_native)
         train_lora_layoutlmv3(
             train_dataset=train_ds,
             val_dataset=val_ds,
@@ -196,6 +214,9 @@ def _train_group(
             max_length=args.max_length,
             label2id=label2id,
             id2label=id2label,
+            hf_native_datasets=hf_native,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
         )
 
     # Donut adapter

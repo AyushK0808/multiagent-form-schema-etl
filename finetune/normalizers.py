@@ -30,7 +30,7 @@ from metrics import norm_bbox
 
 logger = logging.getLogger(__name__)
 
-NORMALIZATION_VERSION = 7
+NORMALIZATION_VERSION = 9
 
 
 def _open_image(value: Any) -> Image.Image:
@@ -126,30 +126,69 @@ def normalize_cord(example: Dict) -> Dict:
     segments = []
     gt_parse = cord_parse_ground_truth(example.get("ground_truth"))
 
-    def visit(node: Any, path: List[str]) -> None:
-        if isinstance(node, dict):
-            words = node.get("words")
-            if isinstance(words, list):
-                mapped = cord_layout_label(path)
-                for word in words:
-                    bbox = cord_word_bbox(word)
-                    if bbox is None:
-                        continue
-                    segments.append(
-                        {
-                            "bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h),
-                            "label": mapped,
-                        }
-                    )
-            for key, value in node.items():
-                if key == "words":
+    # Format A: gt_parse contains valid_line[{category, words:[{quad,text}]}]
+    valid_lines = gt_parse.get("valid_line") or []
+    if valid_lines:
+        for line in valid_lines:
+            line_label = cord_layout_label([line.get("category", "")])
+            for word in line.get("words") or []:
+                bbox = cord_word_bbox(word)
+                if bbox is None:
                     continue
-                visit(value, path + [str(key)])
-        elif isinstance(node, list):
-            for item in node:
-                visit(item, path)
+                segments.append({
+                    "bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h),
+                    "label": line_label,
+                })
+        if segments:
+            return {"image": image, "segments": segments, "label_text": "cord_receipt", "dataset_name": "CORD"}
 
-    visit(gt_parse, [])
+    # Format B: semantic-only gt_parse (nm/cnt/price under menu, plus
+    # store_info / sub_total / payment_info sections).
+    # Walk each TOP-LEVEL section separately so the section key — not the
+    # leaf key — drives the label, then assign a canonical vertical zone
+    # for that section so the model sees realistic spatial distribution.
+    #
+    # Typical receipt vertical layout (normalised 0-1000):
+    #   store header  0  – 150
+    #   menu items  150  – 700
+    #   sub-totals  700  – 850
+    #   payment     850  – 950
+    #   meta/date   950  – 1000
+    SECTION_ZONES: Dict[str, tuple] = {
+        "store_info":    ("heading",   0,   150),
+        "menu":          ("list_item", 150, 700),
+        "sub_total":     ("list_item", 700, 850),
+        "payment_info":  ("other",     850, 950),
+        "void_menu":     ("other",     850, 950),
+    }
+    DEFAULT_ZONE = ("paragraph", 0, 1000)
+
+    for section_key, section_val in gt_parse.items():
+        label, zone_y0, zone_y1 = SECTION_ZONES.get(section_key, DEFAULT_ZONE)
+
+        # Collect every leaf string in this section
+        def _leaves(node: Any) -> List[str]:
+            if isinstance(node, dict):
+                return [v for sub in node.values() for v in _leaves(sub)]
+            if isinstance(node, list):
+                return [v for item in node for v in _leaves(item)]
+            return [str(node)] if node is not None else []
+
+        leaf_values = _leaves(section_val)
+        if not leaf_values:
+            continue
+
+        # Distribute leaves evenly within the section's vertical zone
+        zone_h = max(zone_y1 - zone_y0, 1)
+        step = zone_h / len(leaf_values)
+        for i, _ in enumerate(leaf_values):
+            y0 = int(zone_y0 + i * step)
+            y1 = int(zone_y0 + (i + 1) * step)
+            segments.append({
+                "bbox": norm_bbox([0, y0, w, y1], w, h),
+                "label": label,
+            })
+
     return {"image": image, "segments": segments, "label_text": "cord_receipt", "dataset_name": "CORD"}
 
 
@@ -157,17 +196,31 @@ def normalize_sroie(example: Dict) -> Dict:
     image = _open_image(example.get("image") or example.get("img"))
     w, h = image.size
     segments = []
-    for ann in example.get("ocr") or example.get("words") or example.get("annotations") or []:
-        if not isinstance(ann, dict):
-            continue
-        bbox = ann.get("bbox") or ann.get("box") or ann.get("points")
-        if bbox is None:
-            continue
-        text = str(ann.get("text", "")).lower()
-        label = "paragraph"
-        if any(token in text for token in ("invoice", "receipt", "tax", "total", "amount")):
+
+    words = example.get("words") or []
+    bboxes = example.get("bboxes") or []
+    entities: Dict = example.get("entities") or {}
+
+    # Build a set of entity value substrings for fast label lookup
+    company_val = str(entities.get("company", "")).lower()
+    date_val    = str(entities.get("date", "")).lower()
+    address_val = str(entities.get("address", "")).lower()
+    total_val   = str(entities.get("total", "")).lower()
+
+    for word, bbox in zip(words, bboxes):
+        text = str(word).lower()
+        if company_val and company_val in text:
             label = "heading"
+        elif total_val and total_val in text:
+            label = "list_item"
+        elif date_val and date_val in text:
+            label = "other"
+        elif address_val and any(part in text for part in address_val.split() if len(part) > 3):
+            label = "paragraph"
+        else:
+            label = "paragraph"
         segments.append({"bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h), "label": label})
+
     return {"image": image, "segments": segments, "label_text": "sroie_invoice", "dataset_name": "SROIE"}
 
 

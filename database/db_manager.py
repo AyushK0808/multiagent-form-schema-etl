@@ -122,7 +122,6 @@ class DatabaseManager:
                     (schema_id, form_name, version, description, schema_json, source, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(form_name) DO UPDATE SET
-                    schema_id   = excluded.schema_id,
                     version     = excluded.version,
                     description = excluded.description,
                     schema_json = excluded.schema_json,

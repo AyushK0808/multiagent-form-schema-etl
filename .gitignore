@@ -4,3 +4,5 @@ data/
 *.log
 .env
 models
+figures
+plots.py

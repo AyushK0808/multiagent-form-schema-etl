@@ -58,7 +58,6 @@ def _make_donut_lora_config(group_name: str):
 def _preprocess_dataset(dataset, processor, max_length: int):
     def encode(example: Dict) -> Dict:
         target       = json.dumps({"schema": example["label_text"]}, ensure_ascii=True)
-        pixel_values = processor(example["image"], return_tensors="pt").pixel_values.squeeze(0)
         decoder_text = f"{DONUT_TASK_PROMPT}{target}{processor.tokenizer.eos_token}"
         labels = processor.tokenizer(
             decoder_text,
@@ -69,16 +68,14 @@ def _preprocess_dataset(dataset, processor, max_length: int):
             return_tensors="pt",
         ).input_ids.squeeze(0)
         labels[labels == processor.tokenizer.pad_token_id] = -100
-        return {"pixel_values": pixel_values, "labels": labels}
+        return {"image": example["image"], "labels": labels.tolist()}
 
-    encoded = dataset.map(
+    return dataset.map(
         encode,
         batched=False,
-        remove_columns=dataset.column_names,
+        remove_columns=[c for c in dataset.column_names if c not in ("image", "labels")],
         desc="Encode Donut (LoRA) inputs",
     )
-    encoded.set_format("torch")
-    return encoded
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +152,11 @@ def train_lora_donut(
 
     def collate(features: List[Dict]) -> Dict[str, torch.Tensor]:
         return {
-            "pixel_values": torch.stack([f["pixel_values"] for f in features]),
-            "labels":       torch.stack([f["labels"]       for f in features]),
+            "pixel_values": torch.stack([
+                processor(f["image"], return_tensors="pt").pixel_values.squeeze(0)
+                for f in features
+            ]),
+            "labels": torch.tensor([f["labels"] for f in features], dtype=torch.long),
         }
 
     # ── CSV + plot callback ───────────────────────────────────────────────

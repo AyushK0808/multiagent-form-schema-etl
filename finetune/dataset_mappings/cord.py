@@ -19,15 +19,64 @@ def cord_parse_ground_truth(raw_ground_truth: Any) -> Dict[str, Any]:
     return parsed.get("gt_parse", parsed)
 
 
-def cord_layout_label(path_tokens: Iterable[str]) -> str:
-    joined = " ".join(str(token).lower() for token in path_tokens if token)
+# Maps every known CORD-v2 gt_parse key to a layout label.
+# Leaf keys take priority over parent keys when both appear in a path.
+_CORD_KEY_LABEL: Dict[str, str] = {
+    # store / header info  (parent: store_info)
+    "store_info":        "heading",
+    "store_name":        "heading",
+    "store_addr":        "heading",
+    "biz_nm":            "heading",
+    "branch_nm":         "heading",
+    "tel":               "heading",
+    "fax":               "heading",
+    # menu line items  (parent: menu)
+    "menu":              "list_item",
+    "nm":                "list_item",
+    "cnt":               "list_item",
+    "price":             "list_item",
+    "unitprice":         "list_item",
+    "discountprice":     "list_item",
+    "num":               "list_item",
+    "itemsubtotal":      "list_item",
+    "vatyn":             "list_item",
+    "etc":               "list_item",
+    # totals  (parent: sub_total)
+    "sub_total":         "list_item",
+    "subtotal_price":    "list_item",
+    "tax_price":         "list_item",
+    "discount_price":    "list_item",
+    "service_price":     "list_item",
+    "othersvc_price":    "list_item",
+    "total":             "list_item",
+    "total_price":       "list_item",
+    "total_etc":         "list_item",
+    "cashprice":         "list_item",
+    "changeprice":       "list_item",
+    "creditcardprice":   "list_item",
+    "emoneyprice":       "list_item",
+    # payment / meta
+    "payment_info":      "other",
+    "date":              "other",
+    "time":              "other",
+    "cashier":           "other",
+    "void_menu":         "other",
+    # table
+    "table":             "table",
+}
 
-    if any(k in joined for k in ("table", "tabular", "grid")):
-        return "table"
-    if any(k in joined for k in ("menu", "item", "qty", "quantity", "price", "subtotal", "sub_total", "total", "tax")):
-        return "list_item"
-    if any(k in joined for k in ("store", "seller", "address", "phone", "business", "company", "header", "title", "date", "time")):
-        return "heading"
+
+def cord_layout_label(path_tokens: Iterable[str]) -> str:
+    """Return the layout label for a gt_parse path.
+
+    Uses the deepest (last) token that appears in _CORD_KEY_LABEL so that
+    leaf keys (e.g. 'store_name') override their parent ('store_info').
+    """
+    tokens = [str(t).lower() for t in path_tokens if t]
+    # Walk from deepest to shallowest for most-specific match
+    for token in reversed(tokens):
+        if token in _CORD_KEY_LABEL:
+            return _CORD_KEY_LABEL[token]
     return "paragraph"
 
 

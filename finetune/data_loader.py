@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 from PIL import Image
 
 from augmentation import AUGMENTATION_VERSION, AUGMENTORS, augment_image
-from config import DATASET_SPECS, DatasetSpec
+from config import DATASET_SPECS, DATASET_WEIGHTS, DatasetSpec
 from normalizers import NORMALIZATION_VERSION, NORMALIZERS, normalize_generic
 
 logger = logging.getLogger(__name__)
@@ -283,6 +283,28 @@ def _maybe_augment_and_cache(
     return augmented_train_ds
 
 
+def _apply_weights(train_parts: list, specs_loaded: list) -> list:
+    """Resample each train split by its DATASET_WEIGHTS entry to avoid size bias."""
+    import math
+    raw_weights = [DATASET_WEIGHTS.get(spec.name, 1.0) for spec in specs_loaded]
+    total = sum(raw_weights)
+    norm = [w / total for w in raw_weights]
+    # Target size = largest weighted split size
+    weighted_sizes = [len(ds) * w for ds, w in zip(train_parts, norm)]
+    target = max(weighted_sizes)
+    resampled = []
+    for ds, w in zip(train_parts, norm):
+        n = max(1, round(target * w))
+        if n <= len(ds):
+            resampled.append(ds.select(range(n)))
+        else:
+            # Oversample by repeating indices
+            repeats = math.ceil(n / len(ds))
+            indices = (list(range(len(ds))) * repeats)[:n]
+            resampled.append(ds.select(indices))
+    return resampled
+
+
 def build_combined_dataset(
     dataset_names: List[str],
     max_train_samples: Optional[int],
@@ -293,6 +315,7 @@ def build_combined_dataset(
     refresh_augmented_cache: bool = False,
     augment_train: bool = True,
     curriculum: bool = False,
+    apply_weights: bool = True,
 ):
     from datasets import concatenate_datasets
 
@@ -300,7 +323,7 @@ def build_combined_dataset(
     if curriculum:
         specs = sorted(specs, key=lambda s: s.curriculum_order)
 
-    train_parts, val_parts, manifest = [], [], []
+    train_parts, val_parts, specs_loaded, manifest = [], [], [], []
     for spec in specs:
         train_ds, val_ds = _load_single_dataset(
             spec,
@@ -316,16 +339,23 @@ def build_combined_dataset(
             continue
         train_parts.append(train_ds)
         val_parts.append(val_ds)
+        specs_loaded.append(spec)
         manifest.append({
             **asdict(spec),
             "normalizer": _handler_name(NORMALIZERS.get(spec.name), "normalize_generic"),
             "augmentor": _handler_name(AUGMENTORS.get(spec.name), "augment_identity"),
             "train_examples": len(train_ds),
             "validation_examples": len(val_ds),
+            "dataset_weight": DATASET_WEIGHTS.get(spec.name, 1.0),
         })
 
     if not train_parts:
         raise RuntimeError("No datasets could be loaded - check dataset IDs and network access.")
+
+    if apply_weights and len(train_parts) > 1:
+        train_parts = _apply_weights(train_parts, specs_loaded)
+        for entry, ds in zip(manifest, train_parts):
+            entry["weighted_train_examples"] = len(ds)
 
     train_dataset = concatenate_datasets(train_parts)
     val_dataset = concatenate_datasets(val_parts)
