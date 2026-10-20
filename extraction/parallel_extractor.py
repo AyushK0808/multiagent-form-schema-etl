@@ -10,7 +10,7 @@ ExtractionBundle for the downstream ReflexivePolicyLayer.
 LoRA adapter routing
 --------------------
 Both _run_layoutlm and ParallelExtractor accept an `adapter_group` parameter
-("group_1" | "group_2" | "group_3").  The group is resolved upstream by the
+("group_1" | "group_2").  The group is resolved upstream by the
 orchestrator and passed down here so the correct LoRA adapter is active
 when FormFiller calls the LayoutLMv3 token classifier.
 """
@@ -191,7 +191,7 @@ class ParallelExtractor:
     donut_model_id : override the default Donut checkpoint
     max_workers    : thread pool size (default 2)
     adapter_group  : LoRA adapter group to activate for LayoutLM
-                     ("group_1" | "group_2" | "group_3")
+                     ("group_1" | "group_2")
     """
 
     def __init__(

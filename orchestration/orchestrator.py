@@ -45,7 +45,7 @@ class ContractState(TypedDict, total=False):
     pdf_metadata: dict
 
     # LoRA routing — resolved once from schema_recognition.form_name
-    adapter_group: str   # "group_1" | "group_2" | "group_3"
+    adapter_group: str   # "group_1" | "group_2"
 
     # Layout
     clause_graph:       dict

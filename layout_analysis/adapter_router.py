@@ -53,7 +53,6 @@ class AdapterRouter:
             <adapter_root>/
                 group_1/layoutlmv3/  ← adapter_config.json + adapter weights
                 group_2/layoutlmv3/
-                group_3/layoutlmv3/
     """
 
     def __init__(self, adapter_root: Optional[Path] = None):
@@ -105,7 +104,7 @@ class AdapterRouter:
     def available_groups(self) -> List[str]:
         """Return group names for which an adapter checkpoint exists on disk."""
         groups = []
-        for grp in ("group_1", "group_2", "group_3"):
+        for grp in ("group_1", "group_2"):
             if (self.adapter_root / grp / "layoutlmv3").exists():
                 groups.append(grp)
         return groups
