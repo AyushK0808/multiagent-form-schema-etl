@@ -1,7 +1,7 @@
 """
 Schema Resolution Agent
 =======================
-Uses a Groq-hosted LLM (llama-3.3-70b-versatile by default — fast, cheap,
+Uses a Groq-hosted LLM (openai/gpt-oss-120b by default — fast, cheap,
 strong at structured output) to perform three policy-governed tasks:
 
   1. NORMALISE  — semantic field normalisation: remove jargon, standardise
@@ -29,8 +29,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SMALL_MODEL = "llama-3.1-8b-instant"
-_DEFAULT_SYNTHESIS_MODEL = "llama-3.3-70b-versatile"
+_DEFAULT_SMALL_MODEL = "openai/gpt-oss-20b"
+_DEFAULT_SYNTHESIS_MODEL = "openai/gpt-oss-120b"
 _MAX_RETRIES        = 2
 
 
@@ -62,6 +62,7 @@ def _call_groq(
     from utils.llm_cache import cached_call, make_key, record_usage
 
     def _request() -> str:
+        extra = {"reasoning_effort": "low"} if model.startswith("openai/gpt-oss") else {}
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -69,7 +70,8 @@ def _call_groq(
                 {"role": "user",    "content": user_prompt},
             ],
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=max(max_tokens, 2048) if extra else max_tokens,
+            **extra,
         )
         usage = getattr(response, "usage", None)
         record_usage("groq", 1, getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))

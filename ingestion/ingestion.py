@@ -136,7 +136,9 @@ class PDFIngester:
             sx = page.rect.width / pix.width
             sy = page.rect.height / pix.height
 
-            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            # --psm 6 (uniform text block) recovers more receipt numbers than the
+            # default page segmentation; chosen on the CORD validation split.
+            data = pytesseract.image_to_data(img, config="--psm 6", output_type=pytesseract.Output.DICT)
 
             lines: Dict[tuple, List[int]] = {}
             for i, word in enumerate(data["text"]):

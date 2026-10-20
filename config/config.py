@@ -58,9 +58,10 @@ class ModelConfig:
 class GroqConfig:
     """Configuration for the Groq-hosted LLM (schema-resolution agent)."""
     api_key:  str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
-    small_model: str = "llama-3.1-8b-instant"
-    synthesis_model: str = "llama-3.3-70b-versatile"
-    vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # The Llama models used originally are no longer served by Groq.
+    small_model: str = "openai/gpt-oss-20b"
+    synthesis_model: str = "openai/gpt-oss-120b"
+    vision_model: str = "qwen/qwen3.8-27b"
     temperature: float = 0.0
     max_tokens:  int   = 1024
 

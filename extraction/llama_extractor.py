@@ -21,6 +21,10 @@ from utils.llm_cache import cached_call, make_key, record_usage
 
 logger = logging.getLogger(__name__)
 
+# Count of vision calls that failed (API error or unparseable reply). Evaluation
+# runs read this to avoid caching results produced while the API was failing.
+FAILURES = {"count": 0}
+
 
 class GroqVisionExtractor:
     """Extracts schema fields from a page image using a Groq vision model."""
@@ -71,6 +75,7 @@ class GroqVisionExtractor:
             )
             return self._parse_response(text or "", schema)
         except Exception as exc:
+            FAILURES["count"] += 1
             logger.error("[GroqVision] Extraction failed: %s", exc)
             return self._null_result(schema)
 
@@ -124,11 +129,13 @@ class GroqVisionExtractor:
         text = re.sub(r"```(?:json)?\s*|\s*```", "", text)
         start, end = text.find("{"), text.rfind("}") + 1
         if start == -1 or end <= start:
+            FAILURES["count"] += 1
             logger.warning("[GroqVision] No JSON object in response")
             return self._null_result(schema)
         try:
             data = json.loads(text[start:end])
         except json.JSONDecodeError as exc:
+            FAILURES["count"] += 1
             logger.warning("[GroqVision] JSON parse error: %s", exc)
             return self._null_result(schema)
 

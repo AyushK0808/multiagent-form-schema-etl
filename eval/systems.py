@@ -86,8 +86,11 @@ def compute_branches(doc, adapter_group: str = "group_2", refresh: bool = False)
     from ingestion.ingestion import ingest_pdf
     from main import render_pages
 
+    from extraction.llama_extractor import FAILURES
+
     cfg = get_config()
     schema = doc.schema
+    failures_before = FAILURES["count"]
     out: Dict[str, Any] = {"doc_id": doc.doc_id, "dataset": doc.dataset, "timings": {}, "usage": {}}
 
     t0 = time.perf_counter()
@@ -116,6 +119,13 @@ def compute_branches(doc, adapter_group: str = "group_2", refresh: bool = False)
     out["layout"] = asdict(layout)
     out["text_pass"] = (layout.extra or {}).get("text_pass") or {}
 
+    out["vision_failures"] = FAILURES["count"] - failures_before
+    out["branch_errors"] = [r.error for r in (donut, layout) if r.error]
+    if out["vision_failures"] or out["branch_errors"]:
+        # Do not cache a run that hit API or model errors; it would poison later results.
+        logger.error("%s: %d vision failure(s), errors=%s -- not cached",
+                     doc.doc_id, out["vision_failures"], out["branch_errors"])
+        return out
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, ensure_ascii=False, default=str), encoding="utf-8")
     return out

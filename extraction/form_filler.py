@@ -66,7 +66,7 @@ class FormFiller:
 
     def __init__(
         self,
-        vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+        vision_model: Optional[str] = None,
         adapter_group: str = "group_2",
     ):
         self.config       = get_config()
@@ -74,7 +74,7 @@ class FormFiller:
         self.model_name   = model_cfg.llm_model
         self.temperature  = model_cfg.llm_temperature
         self.max_tokens   = model_cfg.llm_max_tokens
-        self.vision_model = vision_model
+        self.vision_model = vision_model or self.config.groq.vision_model
         self.adapter_group = adapter_group   # forwarded to LayoutAnalyzer
         self.last_passes: Dict[str, Dict[str, Any]] = {}   # per-pass outputs of the last populate()
 
