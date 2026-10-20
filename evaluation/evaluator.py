@@ -2,94 +2,114 @@
 Evaluation framework for contract extraction system.
 """
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple
 import logging
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 logger = logging.getLogger(__name__)
 
+def normalize_text(value) -> str:
+    """Lowercase, drop articles and punctuation (keeping decimal points), collapse spaces."""
+    text = str(value).lower().strip()
+    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)  # thousands separators
+    text = re.sub(r"[^\w\s.]", " ", text)
+    text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)
+    text = re.sub(r"\b(a|an|the)\b", " ", text)
+    return " ".join(text.split())
+
+
+def token_f1(pred, gold) -> float:
+    """SQuAD-style token-overlap F1 between two values."""
+    pred_tokens = normalize_text(pred).split()
+    gold_tokens = normalize_text(gold).split()
+    if not pred_tokens or not gold_tokens:
+        return float(pred_tokens == gold_tokens)
+    common = Counter(pred_tokens) & Counter(gold_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(gold_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
 class ExtractionMetrics:
-    """Computes evaluation metrics for extraction results."""
-    
+    """
+    Field-level metrics with token-overlap credit.
+
+    A field only earns credit in proportion to how much of its value matches
+    the gold value. A non-null prediction against a non-null gold value that
+    shares no tokens scores 0. ``fill_rate`` keeps the earlier "was the field
+    filled at all" measure, which is not a correctness metric.
+    """
+
     def __init__(self):
         self.reset()
-    
+
     def reset(self):
-        """Reset all metrics."""
-        self.tp = 0  # True positives
-        self.fp = 0  # False positives
-        self.fn = 0  # False negatives
+        """Reset all counters."""
+        self.score_sum = 0.0       # sum of per-field token F1 over fields with a gold value
+        self.n_pred = 0            # non-null predictions
+        self.n_gold = 0            # non-null gold values
         self.exact_matches = 0
-        self.partial_matches = 0
+        self.filled = 0            # gold present and prediction non-null
+        self.hallucinated = 0      # prediction non-null where gold is null
+        self.missed = 0            # gold present, prediction null
+        self.null_correct = 0      # both null
         self.total_fields = 0
-    
-    def compute_field_level(self, predicted: Dict, ground_truth: Dict) -> Dict:
-        """
-        Compute field-level metrics.
-        
-        Args:
-            predicted: Predicted field values
-            ground_truth: Ground truth field values
-            
-        Returns:
-            Dictionary of metrics
-        """
-        self.reset()
-        
-        all_fields = set(predicted.keys()) | set(ground_truth.keys())
-        self.total_fields = len(all_fields)
-        
-        for field in all_fields:
+
+    def update(self, predicted: Dict, ground_truth: Dict) -> None:
+        """Accumulate one document into the running counters."""
+        for field in set(predicted) | set(ground_truth):
             pred_val = predicted.get(field)
             true_val = ground_truth.get(field)
-            
+            self.total_fields += 1
+
             if pred_val is None and true_val is None:
-                continue  # Both null, skip
-            elif pred_val is not None and true_val is not None:
-                # Both have values
-                self.tp += 1
-                if self._normalize(pred_val) == self._normalize(true_val):
+                self.null_correct += 1
+                continue
+            if pred_val is not None:
+                self.n_pred += 1
+            if true_val is not None:
+                self.n_gold += 1
+
+            if pred_val is not None and true_val is not None:
+                self.filled += 1
+                self.score_sum += token_f1(pred_val, true_val)
+                if normalize_text(pred_val) == normalize_text(true_val):
                     self.exact_matches += 1
-                elif self._partial_match(pred_val, true_val):
-                    self.partial_matches += 1
-            elif pred_val is not None and true_val is None:
-                self.fp += 1
-            else:  # pred_val is None and true_val is not None
-                self.fn += 1
-        
+            elif pred_val is not None:
+                self.hallucinated += 1
+            else:
+                self.missed += 1
+
+    def compute_field_level(self, predicted: Dict, ground_truth: Dict) -> Dict:
+        """Metrics for a single document."""
+        self.reset()
+        self.update(predicted, ground_truth)
         return self.get_metrics()
-    
+
     def get_metrics(self) -> Dict:
-        """Calculate precision, recall, F1."""
-        precision = self.tp / (self.tp + self.fp) if (self.tp + self.fp) > 0 else 0
-        recall = self.tp / (self.tp + self.fn) if (self.tp + self.fn) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        
-        exact_accuracy = self.exact_matches / self.total_fields if self.total_fields > 0 else 0
-        
+        """Soft precision/recall/F1 over the accumulated documents."""
+        precision = self.score_sum / self.n_pred if self.n_pred else 0.0
+        recall = self.score_sum / self.n_gold if self.n_gold else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        scored = self.n_gold + self.hallucinated
         return {
             "precision": round(precision, 3),
             "recall": round(recall, 3),
             "f1": round(f1, 3),
-            "exact_accuracy": round(exact_accuracy, 3),
-            "partial_matches": self.partial_matches,
-            "tp": self.tp,
-            "fp": self.fp,
-            "fn": self.fn
+            "exact_accuracy": round(self.exact_matches / self.n_gold, 3) if self.n_gold else 0.0,
+            "fill_rate": round(self.filled / self.n_gold, 3) if self.n_gold else 0.0,
+            "hallucination_rate": round(self.hallucinated / self.n_pred, 3) if self.n_pred else 0.0,
+            "n_gold": self.n_gold,
+            "n_pred": self.n_pred,
+            "exact_matches": self.exact_matches,
+            "hallucinated": self.hallucinated,
+            "missed": self.missed,
         }
-    
-    def _normalize(self, value) -> str:
-        """Normalize value for comparison."""
-        return str(value).lower().strip()
-    
-    def _partial_match(self, pred, true) -> bool:
-        """Check for partial match (substring or similarity)."""
-        pred_norm = self._normalize(pred)
-        true_norm = self._normalize(true)
-        
-        # Check substring match
-        return pred_norm in true_norm or true_norm in pred_norm
 
 
 class BaselineExtractor:
