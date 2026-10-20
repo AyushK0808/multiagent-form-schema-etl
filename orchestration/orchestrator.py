@@ -42,6 +42,7 @@ class ContractState(TypedDict, total=False):
     # Inputs
     blocks:       list
     page_image:   Any
+    page_images:  list
     pdf_metadata: dict
 
     # LoRA routing — resolved once from schema_recognition.form_name
@@ -202,6 +203,7 @@ class ContractOrchestrator:
                     schema=state["schema"],
                     clause_graph=state.get("clause_graph", {}),
                     full_text=full_text,
+                    page_images=state.get("page_images"),
                 )
             else:
                 logger.info("[ParallelExtract] Donut disabled — LayoutLM only")
@@ -213,6 +215,7 @@ class ContractOrchestrator:
                     state.get("clause_graph", {}),
                     full_text,
                     adapter_group=group,
+                    page_images=state.get("page_images"),
                 )
                 bundle = ExtractionBundle(donut=None, layoutlm=lm_result)
 

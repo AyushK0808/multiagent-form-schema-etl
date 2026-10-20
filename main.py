@@ -44,6 +44,19 @@ def setup_directories() -> None:
     (Path("data") / "intermediate").mkdir(parents=True, exist_ok=True)
 
 
+def render_pages(pdf_path: Path, max_pages: int) -> list:
+    """Render up to ``max_pages`` pages of a PDF as RGB images."""
+    images = []
+    doc = fitz.open(str(pdf_path))
+    try:
+        for idx in range(min(len(doc), max_pages)):
+            pix = doc.load_page(idx).get_pixmap()
+            images.append(Image.frombytes("RGB", [pix.width, pix.height], pix.samples))
+    finally:
+        doc.close()
+    return images
+
+
 # ---------------------------------------------------------------------------
 # Core pipeline runner
 # ---------------------------------------------------------------------------
@@ -65,12 +78,9 @@ def run_pipeline(
     blocks, metadata = ingest_pdf(str(pdf_path))
     logger.info("Ingested %d blocks from %d pages", len(blocks), metadata["total_pages"])
 
-    # 2. First-page image
-    doc  = fitz.open(str(pdf_path))
-    page = doc.load_page(0)
-    pix  = page.get_pixmap()
-    page_image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    doc.close()
+    # 2. Page images (first max_pages pages; page 0 drives layout and schema recognition)
+    page_images = render_pages(pdf_path, get_config().processing.max_pages)
+    page_image = page_images[0]
 
     # 3. Load the nominal schema (schema_resolve node may replace it)
     if not form_name and not schema_id:
@@ -100,6 +110,7 @@ def run_pipeline(
     state = {
         "blocks":       blocks,
         "page_image":   page_image,
+        "page_images":  page_images,
         "pdf_metadata": {**metadata, "source_path": str(pdf_path)},
         "schema_recognition": {"form_name": form_name, "schema_id": schema_id},
         "schema":       schema,
