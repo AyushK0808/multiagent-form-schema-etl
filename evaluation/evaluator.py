@@ -4,7 +4,7 @@ Evaluation framework for contract extraction system.
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import logging
 from collections import Counter, defaultdict
 
@@ -18,6 +18,38 @@ def normalize_text(value) -> str:
     text = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", text)
     text = re.sub(r"\b(a|an|the)\b", " ", text)
     return " ".join(text.split())
+
+
+def canonicalize(value, field_type: str = "string"):
+    """
+    Map a value to a canonical string for its field type, so format differences
+    ("15/01/2019" vs "2019-01-15", "RM 12.50" vs 12.5) are not scored as errors.
+    Applied to predictions and gold values alike. Unparseable values pass through.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if field_type == "date":
+        try:
+            from dateutil import parser as date_parser
+            return date_parser.parse(text, dayfirst=True, fuzzy=True).date().isoformat()
+        except (ValueError, OverflowError, ImportError):
+            return text
+    if field_type == "number":
+        cleaned = re.sub(r"[^0-9.,\-]", "", text)
+        if re.fullmatch(r"-?\d{1,3}(\.\d{3})+", cleaned):
+            cleaned = cleaned.replace(".", "")          # 60.000 (dot as thousands separator)
+        elif cleaned.count(",") and cleaned.count("."):
+            cleaned = cleaned.replace(",", "")          # 1,250.00
+        elif cleaned.count(",") == 1 and len(cleaned.split(",")[1]) <= 2:
+            cleaned = cleaned.replace(",", ".")         # 12,50
+        else:
+            cleaned = cleaned.replace(",", "")
+        try:
+            return f"{float(cleaned):.2f}"
+        except ValueError:
+            return text
+    return text
 
 
 def token_f1(pred, gold) -> float:
@@ -60,11 +92,15 @@ class ExtractionMetrics:
         self.null_correct = 0      # both null
         self.total_fields = 0
 
-    def update(self, predicted: Dict, ground_truth: Dict) -> None:
+    def update(self, predicted: Dict, ground_truth: Dict, field_types: Optional[Dict] = None) -> None:
         """Accumulate one document into the running counters."""
+        field_types = field_types or {}
         for field in set(predicted) | set(ground_truth):
-            pred_val = predicted.get(field)
-            true_val = ground_truth.get(field)
+            ftype = field_types.get(field, "string")
+            pred_val = canonicalize(predicted.get(field), ftype)
+            true_val = canonicalize(ground_truth.get(field), ftype)
+            if pred_val is not None and not str(pred_val).strip():
+                pred_val = None
             self.total_fields += 1
 
             if pred_val is None and true_val is None:
@@ -85,10 +121,10 @@ class ExtractionMetrics:
             else:
                 self.missed += 1
 
-    def compute_field_level(self, predicted: Dict, ground_truth: Dict) -> Dict:
+    def compute_field_level(self, predicted: Dict, ground_truth: Dict, field_types: Optional[Dict] = None) -> Dict:
         """Metrics for a single document."""
         self.reset()
-        self.update(predicted, ground_truth)
+        self.update(predicted, ground_truth, field_types)
         return self.get_metrics()
 
     def get_metrics(self) -> Dict:
