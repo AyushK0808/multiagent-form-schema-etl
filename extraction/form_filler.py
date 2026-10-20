@@ -24,7 +24,7 @@ import torch
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
 from utils.form import FormInstance
 from config.config import get_config
-from utils.llm_cache import cached_call, make_key
+from utils.llm_cache import cached_call, make_key, record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ class FormFiller:
         self.max_tokens   = model_cfg.llm_max_tokens
         self.vision_model = vision_model
         self.adapter_group = adapter_group   # forwarded to LayoutAnalyzer
+        self.last_passes: Dict[str, Dict[str, Any]] = {}   # per-pass outputs of the last populate()
 
         if self.model_name.startswith("ollama/"):
             self.ollama_model = self.model_name.replace("ollama/", "")
@@ -135,6 +136,8 @@ class FormFiller:
         else:
             logger.warning("Pass 1 skipped — no document text")
             extracted = {name: None for name in schema["fields"]}
+
+        self.last_passes = {"text": dict(extracted)}
 
         # Pass 2 — vision LLM for null fields
         null_fields = [k for k, v in extracted.items() if v is None]
@@ -197,6 +200,7 @@ class FormFiller:
                 model=self.ollama_model, prompt=prompt, stream=False,
                 options={"temperature": self.temperature, "num_predict": max(self.max_tokens, 512)},
             )
+            record_usage("ollama", 1, response.get("prompt_eval_count", 0), response.get("eval_count", 0))
             return response["response"]
 
         return cached_call(

@@ -59,7 +59,7 @@ def _call_groq(
     max_tokens: int = 1024,
 ) -> str:
     """Single Groq chat completion.  Returns the assistant message text."""
-    from utils.llm_cache import cached_call, make_key
+    from utils.llm_cache import cached_call, make_key, record_usage
 
     def _request() -> str:
         response = client.chat.completions.create(
@@ -71,6 +71,8 @@ def _call_groq(
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        usage = getattr(response, "usage", None)
+        record_usage("groq", 1, getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
         return response.choices[0].message.content.strip()
 
     return cached_call(

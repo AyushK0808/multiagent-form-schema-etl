@@ -42,6 +42,28 @@ def cache_stats() -> dict:
     return dict(_stats)
 
 
+_usage: dict = {}
+
+
+def record_usage(provider: str, calls: int = 1, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+    """Count real (uncached) LLM calls and tokens, e.g. provider="groq" or "ollama"."""
+    with _lock:
+        for key, inc in (("calls", calls), ("prompt_tokens", prompt_tokens),
+                         ("completion_tokens", completion_tokens)):
+            name = f"{provider}_{key}"
+            _usage[name] = _usage.get(name, 0) + int(inc or 0)
+
+
+def usage_snapshot() -> dict:
+    with _lock:
+        return dict(_usage)
+
+
+def usage_delta(before: dict) -> dict:
+    after = usage_snapshot()
+    return {k: after.get(k, 0) - before.get(k, 0) for k in set(after) | set(before)}
+
+
 def make_key(*parts: Any) -> str:
     """Stable SHA-256 over strings, bytes and JSON-serialisable values."""
     h = hashlib.sha256()

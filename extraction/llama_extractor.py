@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 from PIL import Image
 
 from config.config import get_config
-from utils.llm_cache import cached_call, make_key
+from utils.llm_cache import cached_call, make_key, record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,8 @@ class GroqVisionExtractor:
                     temperature=0.0,
                     max_tokens=512,
                 )
+                usage = getattr(response, "usage", None)
+                record_usage("groq", 1, getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0))
                 return response.choices[0].message.content or ""
 
             text = cached_call(

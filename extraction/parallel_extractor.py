@@ -39,6 +39,7 @@ class ExtractorResult:
     spatial_meta:  Dict[str, Any]
     elapsed_s:     float = 0.0
     error:         Optional[str] = None
+    extra:         Dict[str, Any] = field(default_factory=dict)   # e.g. text-only first-pass output
 
     @property
     def field_coverage(self) -> float:
@@ -81,6 +82,18 @@ class ExtractionBundle:
 # Donut runner  (unchanged — Donut is OCR-free, no adapter routing needed)
 # ---------------------------------------------------------------------------
 
+_DONUT_EXTRACTORS: Dict[str, Any] = {}
+
+
+def _get_donut(model_id: Optional[str]):
+    """One DonutExtractor per checkpoint, so weights are loaded once per process."""
+    from extraction.donut_extractor import DonutExtractor
+    key = model_id or "default"
+    if key not in _DONUT_EXTRACTORS:
+        _DONUT_EXTRACTORS[key] = DonutExtractor(model_id=model_id) if model_id else DonutExtractor()
+    return _DONUT_EXTRACTORS[key]
+
+
 def _as_page_list(page_image, page_images) -> list:
     if page_images:
         return list(page_images)
@@ -96,9 +109,7 @@ def _run_donut(
     """Run Donut on every page; per field keep the most confident non-null answer."""
     t0 = time.perf_counter()
     try:
-        from extraction.donut_extractor import DonutExtractor
-        kwargs = {"model_id": model_id} if model_id else {}
-        extractor = DonutExtractor(**kwargs)
+        extractor = _get_donut(model_id)
         fields: Dict[str, Any] = {}
         confidences: Dict[str, float] = {}
         field_page: Dict[str, int] = {}
@@ -211,6 +222,7 @@ def _run_layoutlm(
             confidences=conf_scores,
             spatial_meta=spatial,
             elapsed_s=time.perf_counter() - t0,
+            extra={"text_pass": filler.last_passes.get("text")},
         )
     except Exception as exc:
         logger.error("[Parallel] LayoutLM runner failed: %s", exc)

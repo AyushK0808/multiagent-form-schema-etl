@@ -90,9 +90,12 @@ class ReflexivePolicyLayer:
         self,
         conf_floor: float = _CONF_FLOOR,
         spatial_preferred: Optional[set] = None,
+        normalise: bool = True,
     ):
         self.conf_floor        = conf_floor
-        self.spatial_preferred = spatial_preferred or _SPATIAL_PREFERRED
+        # An explicit empty set disables the spatial rule (ablation).
+        self.spatial_preferred = _SPATIAL_PREFERRED if spatial_preferred is None else spatial_preferred
+        self.normalise         = normalise
 
     # ------------------------------------------------------------------
     # Main entry
@@ -113,7 +116,8 @@ class ReflexivePolicyLayer:
 
         for fname in all_fields:
             val, conf, spatial = self._select_field(fname, bundle, issues)
-            val = self._normalise(val, schema.get("fields", {}).get(fname, {}))
+            if self.normalise:
+                val = self._normalise(val, schema.get("fields", {}).get(fname, {}))
             fused_fields[fname]  = val
             fused_conf[fname]    = conf
             fused_spatial[fname] = spatial
