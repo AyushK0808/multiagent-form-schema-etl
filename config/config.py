@@ -37,7 +37,7 @@ class ModelConfig:
     llm_max_tokens:  int   = 256
 
     # Donut OCR-free extractor
-    donut_model: str = "naver-clova-ix/donut-base"
+    donut_model: str = field(default_factory=lambda: os.getenv("DONUT_MODEL", "naver-clova-ix/donut-base"))
     schema_recognition_donut_model: str = "models/schema_recognition/donut"
     schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base"
 
