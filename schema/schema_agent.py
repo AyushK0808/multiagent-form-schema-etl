@@ -59,16 +59,26 @@ def _call_groq(
     max_tokens: int = 1024,
 ) -> str:
     """Single Groq chat completion.  Returns the assistant message text."""
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system",  "content": system_prompt},
-            {"role": "user",    "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
+    from utils.llm_cache import cached_call, make_key
+
+    def _request() -> str:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system",  "content": system_prompt},
+                {"role": "user",    "content": user_prompt},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content.strip()
+
+    return cached_call(
+        "groq_text",
+        make_key(model, system_prompt, user_prompt, temperature, max_tokens),
+        _request,
+        groq=True,
     )
-    return response.choices[0].message.content.strip()
 
 
 def _extract_json(text: str) -> Optional[Dict]:

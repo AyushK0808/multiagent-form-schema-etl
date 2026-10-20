@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 from PIL import Image
 
 from config.config import get_config
+from utils.llm_cache import cached_call, make_key
 
 logger = logging.getLogger(__name__)
 
@@ -43,22 +44,30 @@ class GroqVisionExtractor:
         prompt = self._build_prompt(schema)
         image_url = self._image_to_data_url(page_image)
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": image_url}},
-                        ],
-                    }
-                ],
-                temperature=0.0,
-                max_tokens=512,
+            def _request() -> str:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": image_url}},
+                            ],
+                        }
+                    ],
+                    temperature=0.0,
+                    max_tokens=512,
+                )
+                return response.choices[0].message.content or ""
+
+            text = cached_call(
+                "groq_vision",
+                make_key(self.model, prompt, image_url),
+                _request,
+                groq=True,
             )
-            text = response.choices[0].message.content or ""
-            return self._parse_response(text, schema)
+            return self._parse_response(text or "", schema)
         except Exception as exc:
             logger.error("[GroqVision] Extraction failed: %s", exc)
             return self._null_result(schema)

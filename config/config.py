@@ -27,12 +27,12 @@ class ModelConfig:
     schema_recognition_layout_model: str = "models/schema_recognition/layoutlmv3"
     schema_recognition_layout_fallback_model: str = "microsoft/layoutlmv3-base"
 
-    # LoRA adapter root  — each group lives at <adapter_root>/group_{1,2,3}/layoutlmv3/
+    # LoRA adapter root  — each group lives at <adapter_root>/group_{1,2}/layoutlmv3/
     # Set to "" to disable adapter routing and fall back to legacy checkpoint.
     adapter_root: str = "models/adapters"
 
     # Text LLM backend
-    llm_model:       str   = "google/flan-t5-base"
+    llm_model:       str   = "ollama/llama3.2:3b"
     llm_temperature: float = 0.1
     llm_max_tokens:  int   = 256
 
@@ -41,7 +41,7 @@ class ModelConfig:
     schema_recognition_donut_model: str = "models/schema_recognition/donut"
     schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base"
 
-    # LoRA Donut adapter root — each group at <donut_adapter_root>/group_{1,2,3}/donut/
+    # LoRA Donut adapter root — each group at <donut_adapter_root>/group_{1,2}/donut/
     donut_adapter_root: str = "models/adapters"
 
     # Device for local models
@@ -71,6 +71,7 @@ class ProcessingConfig:
     ocr_threshold:        int   = 50
     max_page_size:        int   = 5000
     confidence_threshold: float = 0.70
+    max_pages:            int   = 6
     schema_sim_threshold: float = 0.70
     enable_parallel_extraction: bool = True
 

@@ -24,6 +24,7 @@ import torch
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
 from utils.form import FormInstance
 from config.config import get_config
+from utils.llm_cache import cached_call, make_key
 
 logger = logging.getLogger(__name__)
 
@@ -176,11 +177,19 @@ class FormFiller:
 
     def _call_ollama(self, prompt: str) -> str:
         import ollama
-        response = ollama.generate(
-            model=self.ollama_model, prompt=prompt, stream=False,
-            options={"temperature": self.temperature, "num_predict": max(self.max_tokens, 512)},
+
+        def _request() -> str:
+            response = ollama.generate(
+                model=self.ollama_model, prompt=prompt, stream=False,
+                options={"temperature": self.temperature, "num_predict": max(self.max_tokens, 512)},
+            )
+            return response["response"]
+
+        return cached_call(
+            "ollama_text",
+            make_key(self.ollama_model, prompt, self.temperature, self.max_tokens),
+            _request,
         )
-        return response["response"]
 
     def _call_hf(self, prompt: str) -> str:
         return self._hf(prompt)[0]["generated_text"]
