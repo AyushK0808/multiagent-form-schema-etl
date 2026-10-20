@@ -30,7 +30,7 @@ from metrics import norm_bbox
 
 logger = logging.getLogger(__name__)
 
-NORMALIZATION_VERSION = 9
+NORMALIZATION_VERSION = 10
 
 
 def _open_image(value: Any) -> Image.Image:

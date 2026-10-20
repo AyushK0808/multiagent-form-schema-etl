@@ -18,6 +18,10 @@ from normalizers import NORMALIZATION_VERSION, NORMALIZERS, normalize_generic
 
 logger = logging.getLogger(__name__)
 
+# Fixed across training seeds so every run sees the same train/validation split.
+SPLIT_SEED = 42
+VAL_FRACTION = 0.1
+
 
 def _hf_login() -> None:
     """Authenticate with the HF Hub using HF_TOKEN from the environment or .env."""
@@ -165,12 +169,14 @@ def _load_single_dataset(
 
     if "train" not in ds:
         only = next(iter(ds.keys()))
-        sp = ds[only].train_test_split(test_size=0.1, seed=42)
+        sp = ds[only].train_test_split(test_size=VAL_FRACTION, seed=SPLIT_SEED)
         ds = {"train": sp["train"], "validation": sp["test"]}
     else:
-        val_key = next((n for n in ("validation", "val", "dev", "test") if n in ds), None)
+        # Never fall back to "test": datasets without a validation split get
+        # one carved from train so test stays untouched until final evaluation.
+        val_key = next((n for n in ("validation", "val", "dev") if n in ds), None)
         if val_key is None:
-            sp = ds["train"].train_test_split(test_size=0.1, seed=42)
+            sp = ds["train"].train_test_split(test_size=VAL_FRACTION, seed=SPLIT_SEED)
             ds = {"train": sp["train"], "validation": sp["test"]}
         else:
             ds = {"train": ds["train"], "validation": ds[val_key]}
