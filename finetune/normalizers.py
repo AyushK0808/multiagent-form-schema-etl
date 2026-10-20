@@ -260,7 +260,8 @@ def normalize_doclaynet(example: Dict) -> Dict:
     for cat_id, bbox in zip(category_ids, bboxes):
         cat_name = doclaynet_category_name(cat_id)
         label = DOCLAYNET_MAP.get(cat_name, "other")
-        x0, y0, x1, y1 = _coerce_bbox(bbox, w, h)
+        bx, by, bw, bh = bbox[:4]          # DocLayNet boxes are COCO [x, y, width, height]
+        x0, y0, x1, y1 = bx, by, bx + bw, by + bh
         segments.append({"bbox": norm_bbox([x0, y0, x1, y1], w, h), "label": label})
     return {"image": image, "segments": segments, "label_text": "doclaynet_layout", "dataset_name": "DOCLAYNET"}
 

@@ -168,6 +168,7 @@ def _train_group(
         refresh_augmented_cache=args.refresh_augmented_cache,
         augment_train=augment,
         curriculum=True,
+        apply_weights=False,
     )
     label2id, id2label = build_group_label_space(available, train_ds, val_ds)
     log_dataset_label_distribution(train_ds, "train", grp.name)

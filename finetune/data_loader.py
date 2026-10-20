@@ -160,6 +160,8 @@ def _load_single_dataset(
         load_kwargs["name"] = spec.config_name
     if spec.trust_remote_code:
         load_kwargs["trust_remote_code"] = True
+    if spec.data_files:
+        load_kwargs["data_files"] = spec.data_files
 
     try:
         ds = load_dataset(spec.repo_id, **load_kwargs)
