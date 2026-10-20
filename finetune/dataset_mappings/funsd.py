@@ -34,6 +34,16 @@ def funsd_ner_tag_to_label(tag: int | str) -> str:
     return "O"
 
 
+def funsd_layout_label(tag: int | str) -> str:
+    """Collapse a FUNSD BIO tag onto the six-class layout label space."""
+    from dataset_maps import FUNSD_MAP
+
+    bio = funsd_ner_tag_to_label(tag)
+    if bio == "O":
+        return FUNSD_MAP["other"]
+    return FUNSD_MAP.get(bio.split("-", 1)[1].lower(), FUNSD_MAP["other"])
+
+
 def funsd_word_bio_label(entity_label: str, word_index: int) -> str:
     base = str(entity_label or "other").strip().lower()
     if base == "other":

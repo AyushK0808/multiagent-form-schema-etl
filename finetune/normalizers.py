@@ -24,7 +24,7 @@ from config import DatasetSpec
 from dataset_maps import DOCLAYNET_MAP, DOCBANK_MAP, PUBLAYNET_MAP
 from dataset_mappings.cord import cord_layout_label, cord_parse_ground_truth, cord_word_bbox
 from dataset_mappings.doclaynet import doclaynet_category_name
-from dataset_mappings.funsd import funsd_ner_tag_to_label, funsd_word_bio_label
+from dataset_mappings.funsd import funsd_layout_label, funsd_word_bio_label
 from dataset_mappings.rvl_cdip import rvl_cdip_label_name
 from metrics import norm_bbox
 
@@ -101,7 +101,7 @@ def normalize_funsd(example: Dict) -> Dict:
             segments.append(
                 {
                     "bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h),
-                    "label": funsd_ner_tag_to_label(tag),
+                    "label": funsd_layout_label(tag),
                 }
             )
         return {"image": image, "segments": segments, "label_text": "funsd_form", "dataset_name": "FUNSD"}
@@ -114,7 +114,7 @@ def normalize_funsd(example: Dict) -> Dict:
             segments.append(
                 {
                     "bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h),
-                    "label": funsd_word_bio_label(raw_label, word_index),
+                    "label": funsd_layout_label(funsd_word_bio_label(raw_label, word_index)),
                 }
             )
     return {"image": image, "segments": segments, "label_text": "funsd_form", "dataset_name": "FUNSD"}
