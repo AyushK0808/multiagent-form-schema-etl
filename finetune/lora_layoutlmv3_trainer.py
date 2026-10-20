@@ -144,6 +144,7 @@ def _cord_ner_to_layout(tag_name: str) -> str:
 
 # Q, K, V and attention-output projections only. A bare "dense" target would
 # also match the feed-forward layers, so the pattern is anchored to attention.
+ENCODING_VERSION = 1   # bump when _encode_example changes, to invalidate cached encodings
 LORA_RANK = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
@@ -467,7 +468,7 @@ class _WeightedTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self._class_weights = class_weights
 
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
@@ -478,6 +479,11 @@ class _WeightedTrainer(Trainer):
             weight=weight,
             ignore_index=-100,
         )
+        # When the Trainer is given num_items_in_batch it skips dividing by the
+        # accumulation steps, so a per-batch mean loss would be logged (and
+        # applied) grad_accum times too large. Divide here to keep it a mean.
+        if num_items_in_batch is not None and self.model.training:
+            loss = loss / self.args.gradient_accumulation_steps
         return (loss, outputs) if return_outputs else loss
 
 
@@ -554,10 +560,29 @@ def train_lora_layoutlmv3(
         encoded_train = concatenate_datasets(train_parts)
         encoded_val   = concatenate_datasets(val_parts)
     else:
-        logger.info("[LoRA-%s] Preprocessing train split ...", group_name)
-        encoded_train = _preprocess_dataset(train_dataset, processor, max_length, label2id)
-        logger.info("[LoRA-%s] Preprocessing val split ...", group_name)
-        encoded_val   = _preprocess_dataset(val_dataset, processor, max_length, label2id)
+        # Encoding runs Tesseract per page (about 1.5 pages/s), and it does not
+        # depend on the training seed, so encoded splits are cached on disk.
+        from datasets import load_from_disk
+        from normalizers import NORMALIZATION_VERSION
+
+        enc_dir = Path("data") / "intermediate" / "finetune_encoded" / (
+            f"{group_name}_L{max_length}_n{len(train_dataset)}_{len(val_dataset)}"
+            f"_norm{NORMALIZATION_VERSION}_enc{ENCODING_VERSION}"
+        )
+        if (enc_dir / "train").exists() and (enc_dir / "val").exists():
+            logger.info("[LoRA-%s] Reusing encoded cache %s", group_name, enc_dir)
+            encoded_train = load_from_disk(str(enc_dir / "train"))
+            encoded_val = load_from_disk(str(enc_dir / "val"))
+            encoded_train.set_format("torch")
+            encoded_val.set_format("torch")
+        else:
+            logger.info("[LoRA-%s] Preprocessing train split ...", group_name)
+            encoded_train = _preprocess_dataset(train_dataset, processor, max_length, label2id)
+            logger.info("[LoRA-%s] Preprocessing val split ...", group_name)
+            encoded_val   = _preprocess_dataset(val_dataset, processor, max_length, label2id)
+            enc_dir.mkdir(parents=True, exist_ok=True)
+            encoded_train.save_to_disk(str(enc_dir / "train"))
+            encoded_val.save_to_disk(str(enc_dir / "val"))
 
     _log_supervision_stats(encoded_train, "train", group_name, id2label)
     _log_supervision_stats(encoded_val,   "validation", group_name, id2label)

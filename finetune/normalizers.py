@@ -30,7 +30,7 @@ from metrics import norm_bbox
 
 logger = logging.getLogger(__name__)
 
-NORMALIZATION_VERSION = 10
+NORMALIZATION_VERSION = 11
 
 
 def _open_image(value: Any) -> Image.Image:
@@ -192,34 +192,55 @@ def normalize_cord(example: Dict) -> Dict:
     return {"image": image, "segments": segments, "label_text": "cord_receipt", "dataset_name": "CORD"}
 
 
+def _quad_to_xyxy(quad: Any) -> List[float] | None:
+    """SROIE boxes come as [[x1, x2, x3, x4], [y1, y2, y3, y4]]; return [x0, y0, x1, y1]."""
+    try:
+        xs, ys = quad
+        return [min(xs), min(ys), max(xs), max(ys)]
+    except (TypeError, ValueError):
+        return None
+
+
+def _sroie_line_label(text: str, entities: Dict) -> str:
+    """Layout label for one receipt text line, from the entity values it overlaps."""
+    t = " ".join(str(text).lower().split())
+    if len(t) < 3:
+        return "other"
+
+    def overlaps(value: Any) -> bool:
+        v = " ".join(str(value or "").lower().split())
+        return bool(v) and (t in v or v in t)
+
+    if overlaps(entities.get("company")):
+        return "heading"
+    if overlaps(entities.get("total")):
+        return "list_item"
+    if overlaps(entities.get("date")):
+        return "other"
+    if overlaps(entities.get("address")):
+        return "paragraph"
+    return "paragraph"
+
+
 def normalize_sroie(example: Dict) -> Dict:
     image = _open_image(example.get("image") or example.get("img"))
     w, h = image.size
     segments = []
 
-    words = example.get("words") or []
-    bboxes = example.get("bboxes") or []
-    entities: Dict = example.get("entities") or {}
+    # rth/sroie-2019-v2: objects = {bbox: [quad per line], text: [line], entities: {...}}
+    objects = example.get("objects") or {}
+    texts = objects.get("text") or []
+    quads = objects.get("bbox") or []
+    entities: Dict = objects.get("entities") or example.get("entities") or {}
 
-    # Build a set of entity value substrings for fast label lookup
-    company_val = str(entities.get("company", "")).lower()
-    date_val    = str(entities.get("date", "")).lower()
-    address_val = str(entities.get("address", "")).lower()
-    total_val   = str(entities.get("total", "")).lower()
-
-    for word, bbox in zip(words, bboxes):
-        text = str(word).lower()
-        if company_val and company_val in text:
-            label = "heading"
-        elif total_val and total_val in text:
-            label = "list_item"
-        elif date_val and date_val in text:
-            label = "other"
-        elif address_val and any(part in text for part in address_val.split() if len(part) > 3):
-            label = "paragraph"
-        else:
-            label = "paragraph"
-        segments.append({"bbox": norm_bbox(_coerce_bbox(bbox, w, h), w, h), "label": label})
+    for text, quad in zip(texts, quads):
+        box = _quad_to_xyxy(quad)
+        if box is None:
+            continue
+        segments.append({
+            "bbox": norm_bbox(_coerce_bbox(box, w, h), w, h),
+            "label": _sroie_line_label(text, entities),
+        })
 
     return {"image": image, "segments": segments, "label_text": "sroie_invoice", "dataset_name": "SROIE"}
 
