@@ -21,8 +21,14 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-_DONUT_MODEL_ID = "naver-clova-ix/donut-base"
+_DONUT_MODEL_ID = "naver-clova-ix/donut-base-finetuned-docvqa"
 _TASK_PROMPT    = "<s_docvqa><s_question>{question}</s_question><s_answer>"
+
+# Generation budget per field type: dates and numbers are short, so a longer answer is a runaway.
+_MAX_NEW_TOKENS = {"date": 24, "number": 24}
+_DEFAULT_MAX_NEW_TOKENS = 64
+_MAX_ANSWER_CHARS = 100          # longer answers are text dumps, not field values
+_TOKENIZER_MARKER = re.compile(r"</?s(_[A-Za-z_]+)?>")
 
 
 class DonutExtractor:
@@ -55,6 +61,12 @@ class DonutExtractor:
             logger.info(f"[Donut] Loading {self.model_id} …")
             self._processor = DonutProcessor.from_pretrained(self.model_id, use_fast=False)
             self._model     = VisionEncoderDecoderModel.from_pretrained(self.model_id)
+            unk = self._processor.tokenizer.unk_token_id
+            if self._processor.tokenizer.convert_tokens_to_ids("</s_answer>") == unk:
+                raise ValueError(
+                    f"{self.model_id} has no DocVQA tokens (<s_answer>); the extractor asks questions, "
+                    "so set DONUT_MODEL to a DocVQA-finetuned checkpoint such as "
+                    "naver-clova-ix/donut-base-finetuned-docvqa")
             self._device    = "cuda" if torch.cuda.is_available() else "cpu"
             self._model.to(self._device).eval()
             logger.info(f"[Donut] Ready on {self._device}")
@@ -86,7 +98,8 @@ class DonutExtractor:
 
         for field_name, meta in schema.get("fields", {}).items():
             question   = self._build_question(field_name, meta)
-            value, conf = self._vqa(page_image, question)
+            field_type = meta.get("type", "string")
+            value, conf = self._vqa(page_image, question, _MAX_NEW_TOKENS.get(field_type, _DEFAULT_MAX_NEW_TOKENS))
             # Post-process answer to schema type
             value = self._coerce(value, meta.get("type", "string"))
             fields[field_name]      = value
@@ -113,8 +126,9 @@ class DonutExtractor:
         self,
         image: Image.Image,
         question: str,
+        max_new_tokens: int = _DEFAULT_MAX_NEW_TOKENS,
     ) -> Tuple[Optional[str], float]:
-        """Single VQA inference pass. Returns (answer, confidence)."""
+        """Single VQA inference pass. Returns (answer, confidence); (None, 0) if it did not finish."""
         try:
             prompt   = _TASK_PROMPT.format(question=question)
             enc_img  = self._processor(image, return_tensors="pt").pixel_values.to(self._device)
@@ -122,16 +136,21 @@ class DonutExtractor:
                 prompt, add_special_tokens=False, return_tensors="pt"
             ).input_ids.to(self._device)
 
+            eos_id = self._processor.tokenizer.convert_tokens_to_ids("</s_answer>")
             with torch.no_grad():
                 out = self._model.generate(
                     enc_img,
                     decoder_input_ids=dec_ids,
-                    max_new_tokens=64,
+                    max_new_tokens=max_new_tokens,
                     pad_token_id=self._processor.tokenizer.pad_token_id,
-                    eos_token_id=self._processor.tokenizer.convert_tokens_to_ids("</s_answer>"),
+                    eos_token_id=eos_id,
                     return_dict_in_generate=True,
                     output_scores=True,
                 )
+
+            # An answer that never closed hit the token limit: the model is copying text, not answering.
+            if eos_id not in out.sequences[0][dec_ids.shape[1]:].tolist():
+                return None, 0.0
 
             # Decode answer
             seq = self._processor.batch_decode(out.sequences)[0]
@@ -171,6 +190,8 @@ class DonutExtractor:
             return None
         value = value.strip()
         if not value or value.lower() in ("not mentioned", "n/a", "none", "unknown"):
+            return None
+        if len(value) > _MAX_ANSWER_CHARS or _TOKENIZER_MARKER.search(value):
             return None
         try:
             if field_type == "date":

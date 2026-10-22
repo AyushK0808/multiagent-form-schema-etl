@@ -103,38 +103,54 @@ def _select(indices: List[int], limit: Optional[int], seed: int) -> List[int]:
     return sorted(random.Random(seed).sample(indices, limit))
 
 
-def load_sroie(limit: Optional[int] = None, seed: int = 0) -> List[EvalDoc]:
+def _split_rows(repo: str, split: str):
+    """(dataset, row indices). ``validation`` is the tuning split: CORD's own, and for
+    SROIE the seeded 10% of train that fine-tuning also held out. Never score tuning on test."""
     from datasets import load_dataset
 
-    ds = load_dataset("rth/sroie-2019-v2", split="test")
+    if split == "test":
+        ds = load_dataset(repo, split="test")
+        return ds, list(range(len(ds)))
+    if split != "validation":
+        raise ValueError(f"split must be 'test' or 'validation', got {split!r}")
+    if repo == "naver-clova-ix/cord-v2":
+        ds = load_dataset(repo, split="validation")
+        return ds, list(range(len(ds)))
+    ds = load_dataset(repo, split="train")
+    val = ds.train_test_split(test_size=0.1, seed=42)["test"]
+    return val, list(range(len(val)))
+
+
+def load_sroie(limit: Optional[int] = None, seed: int = 0, split: str = "test") -> List[EvalDoc]:
+    ds, rows = _split_rows("rth/sroie-2019-v2", split)
     docs = []
-    for i in _select(list(range(len(ds))), limit, seed):
+    for i in _select(rows, limit, seed):
         ex = ds[i]
         ent = ex["objects"]["entities"]
         gold = {k: _scalar(ent.get(k)) for k in SROIE_SCHEMA["fields"]}
-        pdf = _image_to_pdf(ex["image"], PDF_CACHE / "sroie" / f"{i:04d}.pdf")
-        docs.append(EvalDoc(f"sroie-{i:04d}", "sroie", pdf, gold, SROIE_SCHEMA))
+        tag = "" if split == "test" else "val-"
+        pdf = _image_to_pdf(ex["image"], PDF_CACHE / "sroie" / f"{tag}{i:04d}.pdf")
+        docs.append(EvalDoc(f"sroie-{tag}{i:04d}", "sroie", pdf, gold, SROIE_SCHEMA))
     return docs
 
 
-def load_cord(limit: Optional[int] = None, seed: int = 0) -> List[EvalDoc]:
-    from datasets import load_dataset
-
-    ds = load_dataset("naver-clova-ix/cord-v2", split="test")
+def load_cord(limit: Optional[int] = None, seed: int = 0, split: str = "test") -> List[EvalDoc]:
+    ds, rows = _split_rows("naver-clova-ix/cord-v2", split)
     docs = []
-    for i in _select(list(range(len(ds))), limit, seed):
+    for i in _select(rows, limit, seed):
         ex = ds[i]
         parse = json.loads(ex["ground_truth"])["gt_parse"]
         gold = {}
         for name, (group, key) in _CORD_PATHS.items():
             node = parse.get(group) or {}
             gold[name] = _scalar(node.get(key)) if isinstance(node, dict) else None
-        pdf = _image_to_pdf(ex["image"], PDF_CACHE / "cord" / f"{i:04d}.pdf")
-        docs.append(EvalDoc(f"cord-{i:04d}", "cord", pdf, gold, CORD_SCHEMA))
+        tag = "" if split == "test" else "val-"
+        pdf = _image_to_pdf(ex["image"], PDF_CACHE / "cord" / f"{tag}{i:04d}.pdf")
+        docs.append(EvalDoc(f"cord-{tag}{i:04d}", "cord", pdf, gold, CORD_SCHEMA))
     return docs
 
 
-def load_synth(limit: Optional[int] = None, seed: int = 0, root: Path = Path("data") / "eval" / "synth") -> List[EvalDoc]:
+def load_synth(limit: Optional[int] = None, seed: int = 0, split: str = "test", root: Path = Path("data") / "eval" / "synth") -> List[EvalDoc]:
     docs = []
     for gold_file in sorted(root.glob("*.json")):
         meta = json.loads(gold_file.read_text(encoding="utf-8"))
@@ -149,7 +165,7 @@ def load_synth(limit: Optional[int] = None, seed: int = 0, root: Path = Path("da
 LOADERS = {"sroie": load_sroie, "cord": load_cord, "synth": load_synth}
 
 
-def load_benchmark(name: str, limit: Optional[int] = None, seed: int = 0) -> List[EvalDoc]:
+def load_benchmark(name: str, limit: Optional[int] = None, seed: int = 0, split: str = "test") -> List[EvalDoc]:
     if name not in LOADERS:
         raise ValueError(f"Unknown benchmark '{name}'. Choose from {sorted(LOADERS)}")
-    return LOADERS[name](limit=limit, seed=seed)
+    return LOADERS[name](limit=limit, seed=seed, split=split)

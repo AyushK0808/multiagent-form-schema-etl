@@ -1,0 +1,662 @@
+{
+  "n_queries": 50,
+  "n_positive": 40,
+  "n_negative": 10,
+  "n_registered": 8,
+  "operating_sigma": 0.7,
+  "curve": [
+    {
+      "sigma": 0.3,
+      "precision": 0.7555555555555555,
+      "recall": 0.85,
+      "false_accept_rate": 0.7
+    },
+    {
+      "sigma": 0.35,
+      "precision": 0.8048780487804879,
+      "recall": 0.825,
+      "false_accept_rate": 0.4
+    },
+    {
+      "sigma": 0.4,
+      "precision": 0.825,
+      "recall": 0.825,
+      "false_accept_rate": 0.3
+    },
+    {
+      "sigma": 0.45,
+      "precision": 0.8888888888888888,
+      "recall": 0.8,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.5,
+      "precision": 0.90625,
+      "recall": 0.725,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.55,
+      "precision": 0.9,
+      "recall": 0.675,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.6,
+      "precision": 0.9285714285714286,
+      "recall": 0.65,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.65,
+      "precision": 0.9259259259259259,
+      "recall": 0.625,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.7,
+      "precision": 1.0,
+      "recall": 0.575,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.75,
+      "precision": 1.0,
+      "recall": 0.4,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.8,
+      "precision": 1.0,
+      "recall": 0.325,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.85,
+      "precision": 1.0,
+      "recall": 0.15,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.9,
+      "precision": 1.0,
+      "recall": 0.0,
+      "false_accept_rate": 0.0
+    },
+    {
+      "sigma": 0.95,
+      "precision": 1.0,
+      "recall": 0.0,
+      "false_accept_rate": 0.0
+    }
+  ],
+  "top1": [
+    {
+      "fields": [
+        "effective_date",
+        "disclosing_party",
+        "receiving_party",
+        "governing_law",
+        "confidentiality_years"
+      ],
+      "label": "nda",
+      "pred": "nda",
+      "sim": 0.857
+    },
+    {
+      "fields": [
+        "agreement_date",
+        "discloser",
+        "recipient",
+        "jurisdiction",
+        "confidentiality_period"
+      ],
+      "label": "nda",
+      "pred": "nda",
+      "sim": 0.758
+    },
+    {
+      "fields": [
+        "effective_date",
+        "disclosing_party",
+        "receiving_party"
+      ],
+      "label": "nda",
+      "pred": "nda",
+      "sim": 0.674
+    },
+    {
+      "fields": [
+        "disclosing_party",
+        "receiving_party",
+        "governing_law",
+        "page_count"
+      ],
+      "label": "nda",
+      "pred": "nda",
+      "sim": 0.599
+    },
+    {
+      "fields": [
+        "start_date",
+        "disclosing_company",
+        "receiving_company",
+        "applicable_law"
+      ],
+      "label": "nda",
+      "pred": "employment_contract",
+      "sim": 0.575
+    },
+    {
+      "fields": [
+        "employee_name",
+        "employer",
+        "start_date",
+        "job_title",
+        "salary"
+      ],
+      "label": "employment_contract",
+      "pred": "employment_contract",
+      "sim": 0.864
+    },
+    {
+      "fields": [
+        "worker_name",
+        "company",
+        "commencement_date",
+        "position",
+        "annual_pay"
+      ],
+      "label": "employment_contract",
+      "pred": "employment_contract",
+      "sim": 0.714
+    },
+    {
+      "fields": [
+        "employee_name",
+        "job_title",
+        "salary"
+      ],
+      "label": "employment_contract",
+      "pred": "employment_contract",
+      "sim": 0.836
+    },
+    {
+      "fields": [
+        "employee_name",
+        "employer",
+        "salary",
+        "document_language"
+      ],
+      "label": "employment_contract",
+      "pred": "employment_contract",
+      "sim": 0.759
+    },
+    {
+      "fields": [
+        "staff_member",
+        "hiring_company",
+        "date_of_joining",
+        "role",
+        "gross_salary"
+      ],
+      "label": "employment_contract",
+      "pred": "employment_contract",
+      "sim": 0.702
+    },
+    {
+      "fields": [
+        "invoice_number",
+        "invoice_date",
+        "vendor",
+        "customer",
+        "total_amount"
+      ],
+      "label": "invoice",
+      "pred": "invoice",
+      "sim": 0.837
+    },
+    {
+      "fields": [
+        "invoice_no",
+        "issue_date",
+        "supplier_name",
+        "client_name",
+        "amount_due"
+      ],
+      "label": "invoice",
+      "pred": "invoice",
+      "sim": 0.735
+    },
+    {
+      "fields": [
+        "invoice_number",
+        "vendor",
+        "total_amount"
+      ],
+      "label": "invoice",
+      "pred": "invoice",
+      "sim": 0.781
+    },
+    {
+      "fields": [
+        "invoice_date",
+        "customer",
+        "total_amount",
+        "currency"
+      ],
+      "label": "invoice",
+      "pred": "invoice",
+      "sim": 0.746
+    },
+    {
+      "fields": [
+        "bill_number",
+        "billing_date",
+        "seller",
+        "buyer",
+        "grand_total"
+      ],
+      "label": "invoice",
+      "pred": "land_purchase_agreement",
+      "sim": 0.677
+    },
+    {
+      "fields": [
+        "seller",
+        "buyer",
+        "property_address",
+        "purchase_price",
+        "closing_date"
+      ],
+      "label": "land_purchase_agreement",
+      "pred": "land_purchase_agreement",
+      "sim": 0.868
+    },
+    {
+      "fields": [
+        "vendor_name",
+        "purchaser",
+        "land_location",
+        "sale_price",
+        "completion_date"
+      ],
+      "label": "land_purchase_agreement",
+      "pred": "land_purchase_agreement",
+      "sim": 0.749
+    },
+    {
+      "fields": [
+        "seller",
+        "buyer",
+        "purchase_price"
+      ],
+      "label": "land_purchase_agreement",
+      "pred": "land_purchase_agreement",
+      "sim": 0.809
+    },
+    {
+      "fields": [
+        "property_address",
+        "purchase_price",
+        "closing_date",
+        "witness_name"
+      ],
+      "label": "land_purchase_agreement",
+      "pred": "land_purchase_agreement",
+      "sim": 0.714
+    },
+    {
+      "fields": [
+        "grantor",
+        "grantee",
+        "parcel_address",
+        "consideration_amount",
+        "settlement_date"
+      ],
+      "label": "land_purchase_agreement",
+      "pred": "purchase_order",
+      "sim": 0.499
+    },
+    {
+      "fields": [
+        "company",
+        "date",
+        "address",
+        "total"
+      ],
+      "label": "sroie_receipt",
+      "pred": "sroie_receipt",
+      "sim": 0.469
+    },
+    {
+      "fields": [
+        "store_name",
+        "receipt_date",
+        "store_address",
+        "amount_paid"
+      ],
+      "label": "sroie_receipt",
+      "pred": "sroie_receipt",
+      "sim": 0.618
+    },
+    {
+      "fields": [
+        "company",
+        "total"
+      ],
+      "label": "sroie_receipt",
+      "pred": "sroie_receipt",
+      "sim": 0.419
+    },
+    {
+      "fields": [
+        "company",
+        "date",
+        "address",
+        "total",
+        "cashier"
+      ],
+      "label": "sroie_receipt",
+      "pred": "sroie_receipt",
+      "sim": 0.492
+    },
+    {
+      "fields": [
+        "merchant",
+        "purchase_date",
+        "merchant_address",
+        "total_paid"
+      ],
+      "label": "sroie_receipt",
+      "pred": "land_purchase_agreement",
+      "sim": 0.674
+    },
+    {
+      "fields": [
+        "subtotal_price",
+        "tax_price",
+        "total_price",
+        "cashprice",
+        "changeprice",
+        "creditcardprice"
+      ],
+      "label": "cord_receipt",
+      "pred": "cord_receipt",
+      "sim": 0.847
+    },
+    {
+      "fields": [
+        "subtotal",
+        "tax",
+        "total",
+        "cash_paid",
+        "change_returned",
+        "card_payment"
+      ],
+      "label": "cord_receipt",
+      "pred": "cord_receipt",
+      "sim": 0.674
+    },
+    {
+      "fields": [
+        "subtotal_price",
+        "tax_price",
+        "total_price"
+      ],
+      "label": "cord_receipt",
+      "pred": "cord_receipt",
+      "sim": 0.805
+    },
+    {
+      "fields": [
+        "total_price",
+        "cashprice",
+        "changeprice",
+        "table_number"
+      ],
+      "label": "cord_receipt",
+      "pred": "cord_receipt",
+      "sim": 0.748
+    },
+    {
+      "fields": [
+        "sub_total",
+        "vat",
+        "grand_total",
+        "cash_tendered",
+        "change_due"
+      ],
+      "label": "cord_receipt",
+      "pred": "cord_receipt",
+      "sim": 0.541
+    },
+    {
+      "fields": [
+        "po_number",
+        "order_date",
+        "supplier",
+        "ship_to",
+        "order_total"
+      ],
+      "label": "purchase_order",
+      "pred": "purchase_order",
+      "sim": 0.885
+    },
+    {
+      "fields": [
+        "order_number",
+        "date_ordered",
+        "vendor_name",
+        "delivery_address",
+        "total_value"
+      ],
+      "label": "purchase_order",
+      "pred": "purchase_order",
+      "sim": 0.851
+    },
+    {
+      "fields": [
+        "po_number",
+        "supplier",
+        "order_total"
+      ],
+      "label": "purchase_order",
+      "pred": "purchase_order",
+      "sim": 0.818
+    },
+    {
+      "fields": [
+        "order_date",
+        "ship_to",
+        "order_total",
+        "buyer_contact"
+      ],
+      "label": "purchase_order",
+      "pred": "purchase_order",
+      "sim": 0.823
+    },
+    {
+      "fields": [
+        "purchase_order_id",
+        "placed_on",
+        "supplier_company",
+        "shipping_address",
+        "order_amount"
+      ],
+      "label": "purchase_order",
+      "pred": "purchase_order",
+      "sim": 0.854
+    },
+    {
+      "fields": [
+        "question",
+        "answer",
+        "header"
+      ],
+      "label": "funsd_form",
+      "pred": "funsd_form",
+      "sim": 0.284
+    },
+    {
+      "fields": [
+        "label",
+        "value",
+        "section_title"
+      ],
+      "label": "funsd_form",
+      "pred": "funsd_form",
+      "sim": 0.519
+    },
+    {
+      "fields": [
+        "question",
+        "answer"
+      ],
+      "label": "funsd_form",
+      "pred": "purchase_order",
+      "sim": 0.23
+    },
+    {
+      "fields": [
+        "question",
+        "answer",
+        "header",
+        "page_number"
+      ],
+      "label": "funsd_form",
+      "pred": "funsd_form",
+      "sim": 0.347
+    },
+    {
+      "fields": [
+        "field_label",
+        "field_value",
+        "heading"
+      ],
+      "label": "funsd_form",
+      "pred": "funsd_form",
+      "sim": 0.467
+    },
+    {
+      "fields": [
+        "patient_name",
+        "diagnosis",
+        "prescribed_medication",
+        "dosage",
+        "physician"
+      ],
+      "label": null,
+      "pred": "invoice",
+      "sim": 0.267
+    },
+    {
+      "fields": [
+        "flight_number",
+        "departure_airport",
+        "arrival_airport",
+        "boarding_time",
+        "seat"
+      ],
+      "label": null,
+      "pred": "purchase_order",
+      "sim": 0.425
+    },
+    {
+      "fields": [
+        "student_name",
+        "course_title",
+        "grade",
+        "credit_hours",
+        "semester"
+      ],
+      "label": null,
+      "pred": "invoice",
+      "sim": 0.317
+    },
+    {
+      "fields": [
+        "vehicle_vin",
+        "make",
+        "model",
+        "odometer_reading",
+        "registration_state"
+      ],
+      "label": null,
+      "pred": "land_purchase_agreement",
+      "sim": 0.318
+    },
+    {
+      "fields": [
+        "account_holder",
+        "iban",
+        "statement_period",
+        "opening_balance",
+        "closing_balance"
+      ],
+      "label": null,
+      "pred": "invoice",
+      "sim": 0.404
+    },
+    {
+      "fields": [
+        "hotel_name",
+        "check_in_date",
+        "check_out_date",
+        "room_type",
+        "guest_name"
+      ],
+      "label": null,
+      "pred": "employment_contract",
+      "sim": 0.398
+    },
+    {
+      "fields": [
+        "policy_number",
+        "insured_name",
+        "coverage_amount",
+        "premium",
+        "expiry_date"
+      ],
+      "label": null,
+      "pred": "nda",
+      "sim": 0.438
+    },
+    {
+      "fields": [
+        "recipe_title",
+        "ingredients",
+        "cooking_time",
+        "servings",
+        "oven_temperature"
+      ],
+      "label": null,
+      "pred": "purchase_order",
+      "sim": 0.278
+    },
+    {
+      "fields": [
+        "tournament_name",
+        "team_a",
+        "team_b",
+        "final_score",
+        "venue"
+      ],
+      "label": null,
+      "pred": "land_purchase_agreement",
+      "sim": 0.302
+    },
+    {
+      "fields": [
+        "species",
+        "habitat",
+        "wingspan",
+        "conservation_status",
+        "region"
+      ],
+      "label": null,
+      "pred": "land_purchase_agreement",
+      "sim": 0.174
+    }
+  ]
+}

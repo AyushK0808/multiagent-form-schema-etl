@@ -35,7 +35,7 @@ DOCLAYNET_MAP: Dict[str, str] = {
 
 # FUNSD entity types
 FUNSD_MAP: Dict[str, str] = {
-    "question": "heading",
+    "question": "paragraph",
     "answer":   "paragraph",
     "header":   "heading",
     "other":    "other",

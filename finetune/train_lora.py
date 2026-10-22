@@ -101,6 +101,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42,
                         help="Training seed (the train/validation split seed is fixed)")
     parser.add_argument("--max-val-samples",   type=int)
+    parser.add_argument(
+        "--baseline", choices=("lora", "frozen"), default="lora",
+        help="'frozen' trains only the classifier head on the frozen backbone (LoRA ablation)",
+    )
     parser.add_argument("--no-augment",    action="store_true")
     parser.add_argument(
         "--hf-native",
@@ -221,6 +225,7 @@ def _train_group(
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
             seed=args.seed,
+            train_mode=args.baseline,
         )
 
     # Donut adapter

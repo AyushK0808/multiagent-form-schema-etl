@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,6 +54,74 @@ _SPATIAL_PREFERRED = {"effective_date", "start_date", "salary", "amount",
 
 # Minimum confidence to use a field's value at all (below = treat as None)
 _CONF_FLOOR = 0.15
+
+# A value with more words than this is a clause or a text dump, not a field value.
+_MAX_VALUE_WORDS = 10
+
+
+def _key(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def _as_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).replace(",", "").replace("$", "").strip())
+    except ValueError:
+        return None
+
+
+def _as_date(value: Any) -> Optional[str]:
+    """Canonical ISO date for any parseable date string with an explicit year, else None."""
+    text = str(value).strip()
+    if not re.search(r"\d{4}", text):
+        return None
+    try:
+        from dateutil import parser as date_parser
+        return date_parser.parse(text, default=datetime(1900, 1, 1)).date().isoformat()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _type_valid(value: Any, field_type: str) -> bool:
+    if field_type == "number":
+        return _as_number(value) is not None
+    if field_type == "date":
+        return _as_date(value) is not None
+    return True
+
+
+def _canonical(value: Any, field_type: str) -> str:
+    """Comparison form: equal dates and equal numbers compare equal whatever their format."""
+    if field_type == "number" and _as_number(value) is not None:
+        return repr(float(_as_number(value)))
+    if field_type == "date" and _as_date(value) is not None:
+        return _as_date(value)
+    return _key(value)
+
+
+def _reused_values(result: Optional[ExtractorResult]) -> set:
+    """Values one extractor returned for two or more different fields. A model that gives the
+    same answer to different questions was not answering them."""
+    if result is None or not result.fields:
+        return set()
+    seen: Dict[str, int] = {}
+    for value in result.fields.values():
+        if value is not None:
+            seen[_key(value)] = seen.get(_key(value), 0) + 1
+    return {k for k, n in seen.items() if n > 1}
+
+
+def _implausible(value: Any, field_type: str, reused: set) -> Optional[str]:
+    """Why a value cannot be trusted regardless of its confidence, or None if it looks usable."""
+    if not _type_valid(value, field_type):
+        return f"not a valid {field_type}"
+    if _key(value) in reused:
+        return "same answer given to several fields"
+    if field_type == "string" and len(str(value).split()) > _MAX_VALUE_WORDS:
+        return "clause, not a value"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +160,14 @@ class ReflexivePolicyLayer:
         conf_floor: float = _CONF_FLOOR,
         spatial_preferred: Optional[set] = None,
         normalise: bool = True,
+        donut_fill: str = "non_numeric",
     ):
+        # Whether Donut may fill a field LayoutLM left empty: "all", "non_numeric" (strings, dates,
+        # booleans; a number on a page is easy to ground but hard to attribute to the right field)
+        # or "none" (Donut only cross-checks and replaces unusable LayoutLM values).
+        if donut_fill not in ("all", "non_numeric", "none"):
+            raise ValueError(f"donut_fill must be all, non_numeric or none, not {donut_fill!r}")
+        self.donut_fill = donut_fill
         self.conf_floor        = conf_floor
         # An explicit empty set disables the spatial rule (ablation).
         self.spatial_preferred = _SPATIAL_PREFERRED if spatial_preferred is None else spatial_preferred
@@ -113,9 +189,11 @@ class ReflexivePolicyLayer:
         fused_spatial: Dict[str, Any]   = {}
 
         all_fields = bundle.all_field_names
+        reused = {"donut": _reused_values(bundle.donut), "layoutlm": _reused_values(bundle.layoutlm)}
 
         for fname in all_fields:
-            val, conf, spatial = self._select_field(fname, bundle, issues)
+            ftype = schema.get("fields", {}).get(fname, {}).get("type", "string")
+            val, conf, spatial = self._select_field(fname, bundle, issues, ftype, reused)
             if self.normalise:
                 val = self._normalise(val, schema.get("fields", {}).get(fname, {}))
             fused_fields[fname]  = val
@@ -155,6 +233,8 @@ class ReflexivePolicyLayer:
         fname: str,
         bundle: ExtractionBundle,
         issues: List[str],
+        ftype: str = "string",
+        reused: Optional[Dict[str, set]] = None,
     ) -> Tuple[Any, float, Any]:
         """
         Decide which extractor's value to use for this field.
@@ -163,10 +243,10 @@ class ReflexivePolicyLayer:
         --------
         1. If both agree (normalised equality) → use LayoutLM value (has spatial).
         2. If only one has a value → use that one, flag low-coverage if weak.
-        3. If both disagree:
-           - For spatially anchored fields → prefer LayoutLM.
-           - For semantic fields → prefer Donut.
-           - If both are equally confident (< 5% delta) → prefer higher-coverage extractor.
+        3. If both disagree, LayoutLM wins (it carries spatial evidence, and Donut's confidences are
+           uncalibrated). Donut wins only when LayoutLM's value is demonstrably unusable (wrong type,
+           the same answer given to several fields, or a clause rather than a value) while Donut's
+           is usable, and the field is not spatially anchored. Confidence is never the deciding signal.
         4. Apply confidence floor: values below the floor are discarded (→ None).
         """
         d_val  = self._get(bundle.donut,    fname)
@@ -179,6 +259,10 @@ class ReflexivePolicyLayer:
         if d_val is None and l_val is None:
             return None, 0.0, None
 
+        reused = reused or {}
+        d_bad = _implausible(d_val, ftype, reused.get("donut", set())) if d_val is not None else None
+        l_bad = _implausible(l_val, ftype, reused.get("layoutlm", set())) if l_val is not None else None
+
         # Only one has value
         if d_val is None:
             if l_conf < self.conf_floor:
@@ -190,32 +274,30 @@ class ReflexivePolicyLayer:
             if d_conf < self.conf_floor:
                 issues.append(f"'{fname}': Donut value {d_val!r} below conf floor ({d_conf:.2f})")
                 return None, d_conf, None
+            if d_bad:
+                issues.append(f"'{fname}': Donut-only value {d_val!r} discarded ({d_bad})")
+                return None, 0.0, None
+            if self.donut_fill == "none" or (self.donut_fill == "non_numeric" and ftype == "number"):
+                issues.append(f"'{fname}': Donut-only {ftype} value {d_val!r} not used (donut_fill={self.donut_fill})")
+                return None, 0.0, None
             return d_val, d_conf, None
 
         # Both have values — check agreement
-        if self._values_agree(d_val, l_val):
+        if self._values_agree(d_val, l_val, ftype):
             # Prefer LayoutLM (has spatial), use max confidence
             return l_val, max(d_conf, l_conf), l_spat
 
-        # Disagreement — apply source preference
+        # Disagreement. LayoutLM is the default; Donut takes over only on evidence that LayoutLM's
+        # value is unusable and Donut's is not, never on confidence.
         if fname in self.spatial_preferred:
             chosen_val, chosen_conf, chosen_spat = l_val, l_conf, l_spat
             reason = "spatial field → LayoutLM preferred"
-        elif abs(d_conf - l_conf) < 0.05:
-            # Near-tie: pick higher-coverage extractor's value
-            if (bundle.donut and bundle.donut.field_coverage) >= \
-               (bundle.layoutlm.field_coverage if bundle.layoutlm else 0):
-                chosen_val, chosen_conf, chosen_spat = d_val, d_conf, None
-                reason = "coverage tie-break → Donut"
-            else:
-                chosen_val, chosen_conf, chosen_spat = l_val, l_conf, l_spat
-                reason = "coverage tie-break → LayoutLM"
-        elif d_conf > l_conf:
+        elif l_bad and not d_bad:
             chosen_val, chosen_conf, chosen_spat = d_val, d_conf, None
-            reason = "Donut higher confidence"
+            reason = f"LayoutLM value unusable ({l_bad}) → Donut"
         else:
             chosen_val, chosen_conf, chosen_spat = l_val, l_conf, l_spat
-            reason = "LayoutLM higher confidence"
+            reason = "LayoutLM default" + (f" (Donut value unusable: {d_bad})" if d_bad else "")
 
         issues.append(
             f"'{fname}': disagreement (donut={d_val!r} conf={d_conf:.2f} vs "
@@ -303,11 +385,11 @@ class ReflexivePolicyLayer:
         return result.confidences.get(fname, 0.0)
 
     @staticmethod
-    def _values_agree(a: Any, b: Any) -> bool:
-        """Loose equality: both must be non-None and normalised strings match."""
+    def _values_agree(a: Any, b: Any, field_type: str = "string") -> bool:
+        """Loose equality: both non-None; dates and numbers compare by value, not by format."""
         if a is None or b is None:
             return False
-        return str(a).lower().strip() == str(b).lower().strip()
+        return _canonical(a, field_type) == _canonical(b, field_type)
 
 
 # ---------------------------------------------------------------------------

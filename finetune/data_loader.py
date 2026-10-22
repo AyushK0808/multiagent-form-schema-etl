@@ -198,11 +198,13 @@ def _load_single_dataset(
     train_ds = ds["train"].map(
         normalize,
         remove_columns=ds["train"].column_names,
+        load_from_cache_file=False,
         desc=f"Normalize {spec.name} train",
     )
     val_ds = ds["validation"].map(
         normalize,
         remove_columns=ds["validation"].column_names,
+        load_from_cache_file=False,
         desc=f"Normalize {spec.name} val",
     )
 
@@ -373,3 +375,39 @@ def build_combined_dataset(
     id2label = {i: label for label, i in label2id.items()}
 
     return train_dataset, val_dataset, label2id, id2label, manifest
+
+
+
+# Held-out evaluation. The official test split of each dataset is never used by
+# build_combined_dataset (training / early stopping), so it is only read here.
+TEST_SPLIT_FILES: Dict[str, Dict[str, str]] = {
+    # One of the six test shards (~800 pages) is enough for a per-dataset cap.
+    "DOCLAYNET": {"test": "data/test-00000-of-00006.parquet"},
+}
+
+
+def load_test_dataset(dataset_names: List[str], max_test_samples: Optional[int] = None):
+    """Normalize the official test split of each dataset and concatenate them."""
+    from datasets import concatenate_datasets, load_dataset
+
+    parts = []
+    for name in dataset_names:
+        spec = DATASET_SPECS[name]
+        kwargs: Dict = {}
+        if spec.config_name:
+            kwargs["name"] = spec.config_name
+        data_files = TEST_SPLIT_FILES.get(name) or spec.data_files
+        if data_files:
+            kwargs["data_files"] = data_files
+        ds = load_dataset(spec.repo_id, split="test", **kwargs)
+        if max_test_samples:
+            ds = ds.select(range(min(max_test_samples, len(ds))))
+        norm_fn = NORMALIZERS.get(name)
+        parts.append(ds.map(
+            norm_fn if norm_fn else (lambda ex, spec=spec: normalize_generic(ex, spec)),
+            remove_columns=ds.column_names,
+            load_from_cache_file=False,
+            desc=f"Normalize {name} test",
+        ))
+        logger.info("[DataLoader] %s test: %d examples", name, len(parts[-1]))
+    return concatenate_datasets(parts)

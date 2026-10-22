@@ -1,0 +1,82 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+\newcommand{\rc}[1]{\par\medskip\textbf{Comment.} \emph{#1}\par}
+\newcommand{\rr}{\textbf{Response.}\ }
+
+\begin{document}
+
+\begin{center}\Large\textbf{Response to Reviewers --- Paper 434}\end{center}
+\begin{center}\textit{Policy-Guided Schema-Aware Framework for Semi-Structured Document Information Extraction}\end{center}
+
+We thank the reviewers for their careful reading. The revision changes the paper's claim. Our re-evaluation on public benchmarks showed that the fusion of the two extractors does \emph{not} outperform a plain local vision-language model, and the paper now says so. Auditing the code against the manuscript also showed that the original ``F1'' measured whether a field was filled, not whether it was correct, and that the LoRA adapters are not part of the field-extraction path; both are corrected. Reviewer comments below are paraphrased from our revision notes; \textcolor{red}{replace with the verbatim comments before submission}.
+
+\section*{Summary of changes}
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{Metric.} Per-field token-overlap F1 and exact match replace the fill-based F1. The earlier 0.950 headline is withdrawn; fill rate is reported only as fill rate.
+\item \textbf{Evaluation.} End-to-end evaluation on seeded subsets of the SROIE test set (100 receipts) and the CORD test set (50 receipts), plus the 15-document synthetic stress set, with a vision-language-model baseline, single-branch baselines and an ablation.
+\item \textbf{Fusion policy.} Rewritten around evidence (type validity, duplicated answers, clause length, grounding in the OCR text) instead of Donut's uncalibrated confidence; Algorithm~1 now matches the code.
+\item \textbf{LoRA.} Retrained with the configuration of Table~II, three seeds, validation split separated from training, held-out test results, cross-group results and a frozen-backbone baseline.
+\item \textbf{Branch naming.} The ``LayoutLM branch'' is renamed the OCR-LLM branch; it never ran LayoutLMv3. The LoRA adapters are reported as a layout labeller evaluated on its own.
+\item \textbf{New sections.} Ablation, failure analysis, latency, limitations; related work rewritten in four threads; figures redrawn; Fig.~4 removed (it repeated Fig.~3's data, which Table~II now carries).
+\end{itemize}
+
+\section*{Reviewer 1 (accept, minor revision)}
+
+\rc{The 15-document end-to-end evaluation is small; please justify it.}
+\rr We no longer rely on it. The 15 synthetic documents are kept only as a stress test of multi-page and clause-level fields and are described as saturated and author-written (Section V-B, ``Limitations of the Evaluation''). The main results use 100 SROIE and 50 CORD test receipts drawn with a fixed seed. These are still modest subsets, chosen to bound the cost of running a 7B vision-language model on an 8\,GB laptop GPU, and we state that differences under 0.02 F1 are not significant.
+
+\rc{Why exactly two adapter groups?}
+\rr Two groups because only four of the datasets we considered carry token- or region-level layout labels usable for the layout-labelling objective: CORD and SROIE (receipts and invoices, Group~1) and FUNSD and DocLayNet (forms and multi-domain pages, Group~2). The datasets without such labels (DocVQA, Kleister-NDA) cannot train this objective, so a third group was dropped. Table~III shows the groups are specialised: macro-F1 falls to 0.195 and 0.128 on the other group's test set. This is stated in Section IV-C and Section V-A.
+
+\section*{Reviewer 2 (reject)}
+
+\rc{The abstract lacks a problem statement and the need for the method; the literature review should be rewritten; novelty is unclear.}
+\rr The abstract now opens with the setting (reconciling an OCR-free generator with an OCR-text extractor under a runtime schema) and reports headline numbers, including the negative ones. Related work is rewritten as four threads (layout-aware models, OCR-free models, LLM and vision-language extraction, parameter-efficient adaptation), each ending in the gap addressed; references that were never cited were cited or removed, and CUAD is now described as a dataset. On novelty we have narrowed the claim rather than sharpened it: on SROIE and CORD, fusion matches its OCR-LLM branch but does not beat a vision-language model alone, so we present the pipeline as an auditable, modular alternative (per-field source and reason are recorded) and as a negative result on fusion, not as an accuracy improvement.
+
+\rc{The results are not convincing.}
+\rr We agree that the original results were not. The original F1 credited any non-null prediction, so Donut scored 1.000 with every value wrong; this is corrected and the old figures are withdrawn. The new results (Table~V, ablation and per-field failure analysis) are mixed and are reported as such: for example, SROIE F1 0.801 (pipeline) against 0.992 (vision-language model), CORD 0.836 against 0.843.
+
+\rc{Figures are poor.}
+\rr Figures~1 and~2 are redrawn as vector graphics with larger labels and now show two branches, not three, plus the grounding step and the status of the LoRA adapters. Figure~4 is replaced by the table it duplicated.
+
+\section*{Reviewer 3 (accept, major revision)}
+
+\rc{Novelty should be sharper.}
+\rr See the response to Reviewer~2. The introduction lists four findings instead of claims of superiority: the LoRA gain over a frozen backbone at about 1\% trainable parameters; grounding as the one fusion component with a measurable effect; no benefit of fusing the specialist branches over a vision-language model on receipts; and a per-field audit record.
+
+\rc{Use larger public benchmarks.}
+\rr SROIE and CORD test subsets are used for end-to-end evaluation (100 and 50 documents); the full 347- and 100-page test sets are used for the adapter evaluation. We did not evaluate FUNSD or Kleister-NDA end to end. Both are listed as future work, and multi-page contracts are covered only by the 15 synthetic documents.
+
+\rc{Add external baselines.}
+\rr Added: a vision-language-model-only baseline (Qwen2.5-VL-7B given the page image and schema), Donut alone, the text-LLM first pass alone, and the OCR-LLM branch alone, on the same documents and metric (Table~V). The vision-language-model baseline is the strongest system on both public sets. We did not compare against published LayoutLMv3 numbers because our layout-label task is not the original CORD/FUNSD protocol; this is stated in Section V-B.
+
+\rc{The similarity threshold is given as 0.70 in places and 0.80 in others.}
+\rr $\sigma = 0.70$ is used throughout. The retrieval figure is regenerated from a 50-query labelled set and its precision and recall at 0.70 (1.00 and 0.575) are given in the text with the query counts.
+
+\rc{How well do the LoRA adapters generalise?}
+\rr Added: test-split results (mean $\pm$ std over seeds 13, 42 and 1234), cross-group evaluation, and a frozen-backbone baseline with a trained head. Test macro-F1 is 0.774 and 0.739 for LoRA against 0.706 and 0.550 frozen (Group~2 frozen baseline: one seed, for cost). We do not claim state-of-the-art layout analysis, and we now state that the adapters are evaluated on their own and are not used by the extraction branches, so the end-to-end results say nothing about their value for field extraction.
+
+\rc{Report the compute cost.}
+\rr Reported: 1.18M trainable parameters (0.94\%), 4.5\,MB per adapter, training time per epoch and peak memory on the named GPU (RTX~5060 Laptop, 8\,GB), and per-stage latency per document. The pipeline's median latency (29\,s) is not lower than the vision-language model's (about 20\,s per page); we report this rather than a speed advantage.
+
+\rc{Document the splits, seeds and scripts.}
+\rr Section V now lists seeds, checkpoints, the way validation sets were obtained (a seeded 10\% hold-out where a dataset ships none; previously the test sets served as validation for FUNSD and SROIE, which is fixed), the subset protocol, and the commit of the evaluation code. The scripts and result files for the benchmark, the timing measurement, the schema-matching curve and the figures are in the repository.
+
+\rc{Add a failure analysis.}
+\rr Added (Section V-B). On SROIE the gap to the vision-language model sits in address, company and total (per-field F1 0.76--0.77 against 0.99--1.00), where the OCR-LLM value is well-formed but wrong and no evidence rule fires. On CORD, hallucinations are dominated by one field (subtotal, copied from the total on receipts that print no subtotal), and sparse Tesseract output explains why Donut-only and text-only rows are near zero there. We did not tag every wrong field by cause across all documents; the analysis is per field and per branch.
+
+\rc{Proofreading.}
+\rr The manuscript was edited throughout, including the fusion text (``two fields'' versus three), the determinism claim (now scoped to the fusion layer), the OCR-confidence description and the Table~II configuration, which now matches the trainer.
+
+\section*{Limitations we could not address}
+\begin{itemize}[leftmargin=*,nosep]
+\item Each configuration was run once; run-to-run variation of the language-model stages was not measured.
+\item The benchmark subsets are small, and the LoRA adapters are not connected to field extraction.
+\item The schema-agent repair step uses a hosted model; every other model stage in the evaluation runs locally.
+\end{itemize}
+
+\end{document}

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import time
 from pathlib import Path
 
 from eval.data import load_benchmark
@@ -27,10 +28,21 @@ from utils.llm_cache import cache_stats
 logger = logging.getLogger("eval")
 
 
+def _progress(i: int, n: int, doc_id: str, start: float, t0: float, f1, system: str = "") -> str:
+    """One progress line: position, last-doc time, elapsed, ETA from the mean time per document."""
+    elapsed = time.time() - start
+    eta = elapsed / i * (n - i)
+    f1_txt = f"  running {system} F1={f1:.3f}" if f1 is not None else ""
+    return (f"[{i}/{n} {100 * i / n:3.0f}%] {doc_id}  {time.time() - t0:5.1f}s  "
+            f"elapsed {elapsed / 60:.1f}m  ETA {eta / 60:.1f}m{f1_txt}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset", required=True, choices=["sroie", "cord", "synth"])
     ap.add_argument("--systems", nargs="+", default=SYSTEMS, choices=SYSTEMS)
+    ap.add_argument("--split", default="test", choices=["test", "validation"],
+                    help="validation is for tuning the policy; report numbers on test only")
     ap.add_argument("--limit", type=int, default=None, help="Evaluate a seeded random subset")
     ap.add_argument("--subset-seed", type=int, default=0)
     ap.add_argument("--out", type=Path, default=Path("results"))
@@ -43,19 +55,30 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(levelname)-7s %(message)s")
 
-    docs = load_benchmark(args.dataset, args.limit, args.subset_seed)
+    # The policy logs every disagreement at WARNING, once per derived system; the per-field
+    # audit trail is kept in the returned issues, so keep the progress output readable.
+    logging.getLogger("extraction.policy_layer").setLevel(logging.ERROR)
+
+    docs = load_benchmark(args.dataset, args.limit, args.subset_seed, args.split)
     print(f"{args.dataset}: {len(docs)} documents")
 
-    out_dir = args.out / args.dataset
+    out_dir = args.out / (args.dataset if args.split == "test" else f"{args.dataset}_val")
     out_dir.mkdir(parents=True, exist_ok=True)
     handles = {s: (out_dir / f"{s}.jsonl").open("w", encoding="utf-8") for s in args.systems}
     totals = {s: ExtractionMetrics() for s in args.systems}
 
+    start = time.time()
+    failed_docs = []   # documents whose vision or branch calls failed; their scores are not valid
     try:
         for i, doc in enumerate(docs, 1):
+            t0 = time.time()
             branches = compute_branches(doc, args.adapter_group, refresh=args.refresh)
+            if branches.get("vision_failures") or branches.get("branch_errors"):
+                failed_docs.append(doc.doc_id)
+                print(f"    WARNING {doc.doc_id}: {branches.get('vision_failures', 0)} vision failure(s), "
+                      f"errors={branches.get('branch_errors')} -- scored as empty, not cached")
             if args.branches_only:
-                print(f"[{i}/{len(docs)}] {doc.doc_id} cached")
+                print(_progress(i, len(docs), doc.doc_id, start, t0, None))
                 continue
             for system in args.systems:
                 pred = apply_system(system, branches, doc.schema)
@@ -66,12 +89,17 @@ def main() -> None:
                     "pred": pred, "gold": doc.gold, "field_types": doc.field_types,
                     "metrics": per_doc, "n_pages": branches.get("n_pages"),
                 }, ensure_ascii=False, default=str) + "\n")
+            lead = "full" if "full" in totals else args.systems[0]
+            print(_progress(i, len(docs), doc.doc_id, start, t0, totals[lead].get_metrics()["f1"], lead))
             if i % 10 == 0 or i == len(docs):
-                print(f"[{i}/{len(docs)}] cache={cache_stats()}")
+                print(f"    cache={cache_stats()}")
     finally:
         for h in handles.values():
             h.close()
 
+    if failed_docs:
+        print(f"\n*** {len(failed_docs)}/{len(docs)} documents had failed model calls; the scores below "
+              f"count them as empty and are NOT valid. Fix the cause and re-run (failed docs are not cached). ***")
     if args.branches_only:
         return
     print(f"\n{'system':<18} {'F1':>6} {'P':>6} {'R':>6} {'EM':>6} {'fill':>6} {'halluc':>7}")

@@ -37,7 +37,7 @@ class ModelConfig:
     llm_max_tokens:  int   = 256
 
     # Donut OCR-free extractor
-    donut_model: str = field(default_factory=lambda: os.getenv("DONUT_MODEL", "naver-clova-ix/donut-base"))
+    donut_model: str = field(default_factory=lambda: os.getenv("DONUT_MODEL", "naver-clova-ix/donut-base-finetuned-docvqa"))
     schema_recognition_donut_model: str = "models/schema_recognition/donut"
     schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base"
 
@@ -105,6 +105,10 @@ class Config:
     groq:       GroqConfig       = field(default_factory=GroqConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     paths:      PathConfig       = field(default_factory=PathConfig)
+
+    # Vision backend: "groq" (hosted) or "ollama" (fully local)
+    vision_backend:       str = field(default_factory=lambda: os.getenv("VISION_BACKEND", "groq"))
+    ollama_vision_model:  str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b"))
 
     # Feature flags
     enable_validation:           bool = True

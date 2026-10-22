@@ -134,7 +134,11 @@ def _make_epoch_csv_logger(csv_path: Path):
             logger.info(
                 "[MetricsLogger] epoch=%s  %s",
                 epoch,
-                "  ".join(f"{k}={v:.4f}" for k, v in row.items() if isinstance(v, float)),
+                "  ".join(
+                    f"{k}={v:.3e}" if k == "learning_rate" else f"{k}={v:.4f}"
+                    for k, v in row.items()
+                    if isinstance(v, float)
+                ),
             )
 
         def _flush(self):

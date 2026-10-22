@@ -502,7 +502,12 @@ def train_lora_layoutlmv3(
     max_train_samples: Optional[int] = None,
     max_val_samples: Optional[int] = None,
     seed: int = 42,
+    train_mode: str = "lora",
 ) -> Dict:
+    """train_mode: "lora" trains the adapters plus the classifier head;
+    "frozen" is the baseline that trains the classifier head on the frozen backbone."""
+    if train_mode not in ("lora", "frozen"):
+        raise ValueError(f"train_mode must be 'lora' or 'frozen', got {train_mode!r}")
     try:
         from peft import get_peft_model
     except ImportError:
@@ -535,9 +540,13 @@ def train_lora_layoutlmv3(
         ignore_mismatched_sizes=True,
     )
 
-    lora_cfg = _make_lora_config()
-    model = get_peft_model(model_base, lora_cfg)
-    model.print_trainable_parameters()
+    if train_mode == "lora":
+        model = get_peft_model(model_base, _make_lora_config())
+        model.print_trainable_parameters()
+    else:
+        model = model_base
+        for name, param in model.named_parameters():
+            param.requires_grad = name.startswith("classifier.")
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
 
@@ -595,10 +604,17 @@ def train_lora_layoutlmv3(
         preds, labels_active = preds[mask], labels_flat[mask]
         if labels_active.size == 0:
             return {"macro_f1": 0.0, "accuracy": 0.0}
-        return {
+        metrics = {
             "macro_f1": round(f1_score(labels_active, preds, average="macro", zero_division=0), 4),
             "accuracy": round(float((preds == labels_active).mean()), 4),
         }
+        # Per-class F1 for classes with validation support, so the headline macro
+        # number can be traced to the classes holding it back.
+        present = sorted(int(c) for c in np.unique(labels_active))
+        per_class = f1_score(labels_active, preds, labels=present, average=None, zero_division=0)
+        for cls, score in zip(present, per_class):
+            metrics[f"f1_{id2label[cls]}"] = round(float(score), 4)
+        return metrics
 
     csv_logger = EpochCSVLogger(output_dir / "training_log.csv")
     grad_accum = GRAD_ACCUM_STEPS
@@ -625,6 +641,8 @@ def train_lora_layoutlmv3(
         load_best_model_at_end=True,
         metric_for_best_model="macro_f1",
         greater_is_better=True,
+        # Frozen-baseline checkpoints hold the whole 500 MB model; keep best + latest.
+        save_total_limit=2 if train_mode == "frozen" else None,
         remove_unused_columns=False,
         logging_steps=25,
         report_to="none",
@@ -649,11 +667,15 @@ def train_lora_layoutlmv3(
     train_result = trainer.train()
     train_seconds = time.time() - t_start
 
-    model.save_pretrained(str(output_dir))
+    if train_mode == "lora":
+        model.save_pretrained(str(output_dir))
+    else:
+        torch.save(model.classifier.state_dict(), output_dir / "classifier_head.pt")
     processor.save_pretrained(str(output_dir))
 
     adapter_bytes = sum(
-        f.stat().st_size for f in output_dir.glob("adapter_model.*")
+        f.stat().st_size for f in
+        list(output_dir.glob("adapter_model.*")) + list(output_dir.glob("classifier_head.pt"))
     )
     epochs_run = train_result.metrics.get("epoch") or epochs
     # Table II and the compute-cost table are generated from this file.
@@ -662,6 +684,7 @@ def train_lora_layoutlmv3(
             {
                 "group": group_name,
                 "seed": seed,
+                "train_mode": train_mode,
                 "base_model": "microsoft/layoutlmv3-base",
                 "lora": {
                     "r": LORA_RANK,
