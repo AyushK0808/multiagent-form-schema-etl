@@ -102,25 +102,11 @@ Adapters \cite{houlsby2019adapters} insert small trainable bottleneck layers int
 
 \subsection{Identified Gaps}
 
-The review above points to five gaps that this work addresses.
-
-\textit{Reconciliation without calibrated confidence.} Layout-aware, OCR-free and generative extractors have been studied largely in isolation. Where outputs are combined, the combination relies on voting or confidence weighting, which presupposes calibrated and comparable scores. OCR-free generators are overconfident: we observed Donut assigning similar probabilities to correct and incorrect answers, so a confidence-based policy prefers the wrong branch. A reconciliation rule that decides from evidence on the page rather than from model confidence has not been reported for document extraction.
-
-\textit{Grounding of OCR-free answers.} OCR-free models avoid OCR errors but are not anchored to the page text. Retrieval augmentation grounds a generator before it answers; verifying an OCR-free answer against the OCR text after it has been generated, and measuring the effect on hallucinated values, has not been studied.
-
-\textit{Traceability.} Single-call LLM and VLM extraction and iterative agent loops return values without a record of their origin. Business and legal workflows need to know, for every field, which component produced the value and why it was preferred over the alternatives.
-
-\textit{Schema handling at run time.} Extraction models are trained or prompted for a fixed schema, while schema matching is studied separately in databases. An extraction pipeline that retrieves a schema for an unseen document, and rejects document types it has not registered instead of forcing a wrong match, is rarely evaluated.
-
-\textit{Per-style adaptation and evaluation.} Fully fine-tuning a layout model for every document style multiplies storage and training cost, and parameter-efficient adapters for layout-aware encoders across styles have not been compared with a frozen-backbone baseline on held-out test splits. End-to-end pipelines are also rarely compared with the obvious alternative of a single VLM call on the page.
+Layout-aware, OCR-free and generative extractors have been studied largely in isolation, and where outputs are combined, voting or confidence weighting presupposes calibrated scores that OCR-free generators do not provide. Verifying OCR-free answers against the OCR text after generation, and recording for each field which component produced its value and why, have not been reported. Extraction pipelines also rarely resolve schemas at run time while rejecting unregistered document types, or compare themselves with a single VLM call on the page.
 
 \subsection{Problem Statement}
 
-A document $D$ is a native or scanned PDF. Ingestion turns it into a set of blocks $B=\{b_k\}$, each with a page number, text, bounding box and confidence. A schema $S=\{f_1,\dots,f_n\}$ defines each field $f_i$ by a name, a type $\tau_i$, a natural-language description and a set of value constraints $C_i$, and may carry cross-field constraints $C_S$. The schema is either supplied with the document or must be resolved from a registry $\mathcal{R}$ of known schemas.
-
-The task is to produce, for every field $f_i$, a tuple $(v_i, c_i, a_i)$, where $v_i$ is a value of type $\tau_i$ or null, $c_i\in[0,1]$ is a confidence and $a_i$ is an audit record naming the source branch and the rule that selected $v_i$. The output must satisfy four requirements: \emph{correctness}, meaning that $v_i$ matches the value printed in $D$; \emph{conformance}, meaning that $v_i$ satisfies $C_i$ and the record satisfies $C_S$, or the violation is flagged; \emph{traceability}, meaning that $v_i$ is supported by text in $B$ or by an explicit vision fallback and $a_i$ states how it was chosen; and \emph{determinism}, meaning that, given the branch outputs, $v_i$ is a fixed function of them, so the same inputs always yield the same record. If no schema is supplied, $S$ must be retrieved from $\mathcal{R}$ when a registered schema matches, and an unregistered document type must not be matched to a wrong schema.
-
-We study three questions: whether an evidence-based policy over two complementary branches can match or exceed its strongest branch and a direct VLM baseline; which components of the policy account for its effect; and whether style-specific low-rank adapters improve layout labelling enough over a frozen backbone to justify routing documents by style.
+Given a PDF $D$, turned by ingestion into OCR or native-text blocks $B$, and a schema $S=\{f_1,\dots,f_n\}$ of typed fields with constraints, supplied or resolved from a registry $\mathcal{R}$, produce for every field a value $v_i$ (or null), a confidence $c_i\in[0,1]$ and an audit record $a_i$ naming the source branch and selecting rule. Each $v_i$ must match the document, satisfy its constraints or be flagged, be supported by $B$ or an explicit vision fallback, and be a deterministic function of the branch outputs; an unregistered document type must not be matched to a wrong schema.
 
 % -----------------------------------------------------------------------
 %  IV. SYSTEM ARCHITECTURE AND METHODOLOGY
