@@ -34,23 +34,42 @@ def canvas(w, h):
 
 
 def architecture() -> None:
-    fig, ax = canvas(3.6, 5.0)
-    cx = 1.7
-    box(ax, 1.3, 4.65, 1.9, 0.42, "PDF document")
-    box(ax, cx, 3.95, 2.2, 0.5, "Ingestion\nnative text / Tesseract OCR")
-    box(ax, 0.8, 2.95, 1.45, 0.7, "Donut\n(OCR-free, one\nquestion per field)")
-    box(ax, 2.6, 2.95, 1.45, 0.7, "OCR-LLM branch\ntext LLM, then VLM\nfor empty fields")
-    box(ax, 0.8, 2.15, 1.45, 0.42, "Ground in\nOCR text", fill=ACCENT)
-    box(ax, cx, 1.45, 2.4, 0.5, "Evidence-based fusion\n(per-field source and reason)", fill=ACCENT)
-    box(ax, cx, 0.7, 2.4, 0.5, "Schema repair, validation\nSQLite")
-    box(ax, 3.0, 4.65, 1.1, 0.5, "Schema\nregistry", size=8)
-    for p, q in [((1.3, 4.44), (1.3, 4.2)), ((1.2, 3.7), (0.9, 3.3)), ((2.2, 3.7), (2.5, 3.3)),
-                 ((0.8, 2.6), (0.8, 2.36)), ((0.9, 1.94), (1.3, 1.7)), ((2.5, 2.6), (2.1, 1.7)),
-                 ((cx, 1.2), (cx, 0.95))]:
-        arrow(ax, p, q)
-    arrow(ax, (2.6, 4.4), (2.6, 4.2), dashed=True)
-    box(ax, 3.0, 2.15, 0.95, 0.5, "LoRA layout\nadapters*", dashed=True, size=7)
-    ax.text(1.8, 0.2, "*evaluated on its own; not used by the extraction branches", fontsize=7, color=GREY, ha="center")
+    """One-column, top-to-bottom version of the eight-stage pipeline."""
+    fig, ax = canvas(3.75, 7.6)
+    cx, w, s = 1.45, 2.4, 7.5
+    side = 3.25
+    box(ax, cx, 7.35, 1.4, 0.35, "PDF document", size=s)
+    box(ax, cx, 6.75, w, 0.5, "Ingestion\nnative text or Tesseract OCR,\nword confidence", size=s)
+    box(ax, cx, 6.1, w, 0.45, "1  Adapter routing\nschema name → adapter group", fill=ACCENT, size=s)
+    box(ax, side, 6.1, 0.75, 0.45, "LoRA layout\nadapters", dashed=True, size=s - 1)
+    arrow(ax, (cx, 7.175), (cx, 7.0))
+    arrow(ax, (cx, 6.5), (cx, 6.325))
+    arrow(ax, (side - 0.375, 6.1), (cx + w / 2, 6.1), dashed=True)
+    # parallel panel
+    ax.add_patch(FancyBboxPatch((0.1, 3.9), 2.7, 1.8, boxstyle="round,pad=0.02,rounding_size=0.06",
+                                fc="white", ec=INK, lw=1.0, ls="-"))
+    ax.text(cx, 5.53, "2  Parallel extraction", ha="center", va="center", fontsize=s + 0.5, color=INK, weight="bold")
+    box(ax, 0.78, 5.0, 1.25, 0.55, "Donut\nOCR-free, one\nquestion per field", size=s - 0.5)
+    box(ax, 2.12, 5.0, 1.25, 0.55, "OCR-LLM\ntext LLM over\nOCR text", size=s - 0.5)
+    box(ax, 0.78, 4.35, 1.25, 0.45, "Ground answers\nin OCR text", fill=ACCENT, size=s - 0.5)
+    box(ax, 2.12, 4.35, 1.25, 0.45, "VLM fallback\nfor empty fields", fill=ACCENT, size=s - 0.5)
+    arrow(ax, (0.78, 4.725), (0.78, 4.575))
+    arrow(ax, (2.12, 4.725), (2.12, 4.575))
+    ax.text(cx, 4.0, "branches run in parallel", ha="center", va="center", fontsize=6.5, color=GREY)
+    arrow(ax, (cx, 5.875), (cx, 5.72))
+    # sequential stages
+    names = ["3  Policy fusion: evidence rules", "4  Schema repair: LLM agent", "5  Schema resolve: registry match",
+             "6  Validation: type and range checks", "7  Persist: SQLite", "8  Finalize: fields, scores, issue log"]
+    ys = [3.5 - 0.55 * i for i in range(6)]
+    arrow(ax, (cx, 3.88), (cx, ys[0] + 0.18))
+    for i, (y, t) in enumerate(zip(ys, names)):
+        box(ax, cx, y, w, 0.36, t, fill=ACCENT if i == 0 else FILL, size=s - 0.5)
+        if i:
+            arrow(ax, (cx, ys[i - 1] - 0.18), (cx, y + 0.18))
+    box(ax, side, ys[2], 0.75, 0.36, "Schema\nregistry", size=s - 1)
+    arrow(ax, (side - 0.375, ys[2]), (cx + w / 2, ys[2]))
+    ax.text(cx, 0.3, "Every stage records its errors in the shared state;\nlater stages continue on the partial state.",
+            fontsize=6.5, color=GREY, ha="center", va="center")
     fig.savefig(OUT / "architecture.pdf", bbox_inches="tight")
     plt.close(fig)
 
