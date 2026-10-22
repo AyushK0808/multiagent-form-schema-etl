@@ -50,7 +50,7 @@ semi-structured documents, policy-guided fusion
 
 Business processes produce large volumes of semi-structured documents such as receipts, invoices, forms and contracts. They combine natural-language text with layout structure, and the position of a field varies between versions, vendors and countries, so extraction rules that rely on fixed positions do not carry over.
 
-Rule-based extraction was replaced by layout-aware models such as LayoutLM \cite{layoutlm}, LayoutLMv2 \cite{layoutlmv2} and LayoutLMv3 \cite{layoutlmv3}, and later by OCR-free models such as Donut \cite{kim2022donut}. Large language models (LLMs) \cite{gptner2024} and vision-language models (VLMs) \cite{bai2025qwen25vl} now extract fields from a schema given at run time, without task-specific training. Their outputs, however, are not anchored to the page \cite{ji2023hallucination}: a generator can return a well-formed value that the document does not contain, and a single model call gives no account of where a value came from.
+Rule-based extraction was replaced by layout-aware models such as LayoutLM \cite{layoutlm}, LayoutLMv2 \cite{layoutlmv2} and LayoutLMv3 \cite{layoutlmv3}, and later by OCR-free models such as Donut \cite{kim2022donut}. Large language models (LLMs) \cite{gptner2025} and vision-language models (VLMs) \cite{bai2025qwen25vl} now extract fields from a schema given at run time, without task-specific training. Their outputs, however, are not anchored to the page \cite{ji2023hallucination}: a generator can return a well-formed value that the document does not contain, and a single model call gives no account of where a value came from.
 
 We address this with a framework that treats extraction as a reconciliation problem. Two complementary extractors, an OCR-free Donut branch and an OCR-LLM branch that reads the OCR text and falls back to a VLM for missing fields, run in parallel. A deterministic policy then decides every field from evidence: whether a value is grounded in the OCR text, whether it parses as the field's type, whether it is reused across fields and whether the field is spatially anchored. Model confidence is never the deciding signal. The decision and its reason are logged per field, so every output value can be audited.
 
@@ -68,23 +68,23 @@ Early document extraction systems relied on hand-written rules, regular expressi
 
 \subsection{Layout-Aware Pre-Trained Models}
 
-Chargrid \cite{katti2018chargrid} encodes a page as a character grid and segments it with a convolutional network, showing that two-dimensional structure matters for field extraction. LayoutLM \cite{layoutlm} adds two-dimensional position embeddings of OCR tokens to a BERT-style encoder, LayoutLMv2 \cite{layoutlmv2} adds visual features and spatially aware self-attention, and LayoutLMv3 \cite{layoutlmv3} unifies text and image masking with linear patch embeddings in place of a CNN backbone. BROS \cite{hong2022bros} encodes the relative positions of text blocks, DocFormer \cite{appalaraju2021docformer} shares spatial embeddings across the text and visual streams, LiLT \cite{wang2022lilt} decouples a language-independent layout stream so that it can be combined with different text encoders, and GeoLayoutLM \cite{luo2023geolayoutlm} adds geometric pre-training aimed at relation extraction. TILT \cite{powalski2021tilt} instead casts extraction as sequence generation in an encoder--decoder with a layout-aware attention bias.
+LayoutLM \cite{layoutlm} adds two-dimensional position embeddings of OCR tokens to a BERT-style encoder, LayoutLMv2 \cite{layoutlmv2} adds visual features and spatially aware self-attention, and LayoutLMv3 \cite{layoutlmv3} unifies text and image masking with linear patch embeddings in place of a CNN backbone. BROS \cite{hong2022bros} encodes the relative positions of text blocks, LiLT \cite{wang2022lilt} decouples a language-independent layout stream so that it can be combined with different text encoders, and GeoLayoutLM \cite{luo2023geolayoutlm} adds geometric pre-training aimed at relation extraction. FormNet \cite{lee2022formnet} models label--value structure explicitly, using graph convolutions and rich attention to recover structure that is lost when a form is serialised.
 
-A second line of work models label--value structure explicitly. FormNet \cite{lee2022formnet} uses graph convolutions and rich attention to recover structure lost when a form is serialised, Hwang et al. \cite{hwang2021cost} parse a document into a graph of fields at low annotation cost, and PICK \cite{yu2021pick} combines graph learning with sequence tagging. These models are fine-tuned on benchmarks such as FUNSD \cite{jaume2019funsd} for forms and CORD \cite{park2019cord} and SROIE \cite{huang2019sroie} for receipts, while layout corpora such as PubLayNet \cite{publaynet}, DocBank \cite{docbank} and DocLayNet \cite{pfitzmann2022doclaynet} supply region labels for layout analysis, which Binmakhashen and Mahmoud \cite{binmakhashen2020} survey. All of them depend on an OCR engine such as Tesseract \cite{smith2007tesseract} and inherit its errors, and each new schema needs a task-specific head and labelled data.
+These models are fine-tuned on benchmarks such as FUNSD \cite{jaume2019funsd} for forms and CORD \cite{park2019cord} and SROIE \cite{huang2019sroie} for receipts, and region-level corpora such as DocLayNet \cite{pfitzmann2022doclaynet} supply labels for layout analysis. All of them depend on an OCR engine such as Tesseract \cite{smith2007tesseract} and inherit its errors, and each new schema needs a task-specific head and labelled data.
 
 \subsection{OCR-Free and Generative Document Models}
 
-OCR-free models read the page image directly and generate their output as text. Donut \cite{kim2022donut} pairs a Swin Transformer encoder with a BART decoder and is pre-trained to read text before being fine-tuned for parsing or question answering, Dessurt \cite{davis2022dessurt} trains a similar end-to-end model on a wide range of tasks, and Pix2Struct \cite{lee2023pix2struct} is pre-trained to parse masked web-page screenshots into simplified HTML. UDOP \cite{tang2023udop} unifies text, image and layout in one encoder--decoder that handles both understanding and generation. Because their answers are generated rather than located, these models avoid OCR error propagation but can return text that does not appear on the page, and the token probabilities of modern neural networks are generally not calibrated to correctness \cite{guo2017calibration}. Posing one question per field to a model fine-tuned on DocVQA \cite{mathew2021docvqa} makes the output schema-driven without retraining; we use Donut in this way and check each answer against the OCR text before it can be used.
+OCR-free models read the page image directly and generate their output as text. Donut \cite{kim2022donut} pairs a Swin Transformer encoder with a BART decoder and is pre-trained to read text before being fine-tuned for parsing or question answering, and Pix2Struct \cite{lee2023pix2struct} is pre-trained to parse masked web-page screenshots into simplified HTML. Because their answers are generated rather than located, these models avoid OCR error propagation but can return text that does not appear on the page, and the token probabilities of modern neural networks are generally not calibrated to correctness \cite{guo2017calibration}. Posing one question per field to a model fine-tuned on DocVQA \cite{mathew2021docvqa} makes the output schema-driven without retraining; we use Donut in this way and check each answer against the OCR text before it can be used.
 
 \subsection{LLM and VLM Extraction}
 
-Large language models (LLMs) extract entities and fields from a prompt with little or no annotation; GPT-NER \cite{gptner2024}, for instance, recasts sequence labelling as text generation. For documents, the OCR text is serialised into the prompt, which discards most of the layout and limits the length that can be processed, so long multi-page documents remain difficult; CUAD \cite{cuad2021} provides clause-level annotations for contracts and Kleister \cite{stanislawek2021kleister} key-information labels for long documents with complex layouts. Generative extractors can also produce fluent, well-formed values that the source does not support \cite{ji2023hallucination}. Retrieval-augmented generation \cite{lewis2020rag} reduces this by conditioning the generator on retrieved evidence, but it does not check after generation that the answer is actually supported.
+Large language models (LLMs) extract entities and fields from a prompt with little or no annotation; GPT-NER \cite{gptner2025}, for instance, recasts sequence labelling as text generation. For documents, the OCR text is serialised into the prompt, which discards most of the layout and limits the length that can be processed, so long multi-page documents remain difficult; CUAD \cite{cuad2021} provides clause-level annotations for contracts and Kleister \cite{stanislawek2021kleister} key-information labels for long documents with complex layouts. Generative extractors can also produce fluent, well-formed values that the source does not support \cite{ji2023hallucination}. Retrieval-augmented generation \cite{lewis2020rag} reduces this by conditioning the generator on retrieved evidence, but it does not check after generation that the answer is actually supported.
 
-Agentic methods let a model interleave reasoning and actions \cite{react2023}, reflect on its failures \cite{reflexion2023} or refine its own output iteratively \cite{selfrefine2023}. They can correct errors, but the result depends on a sequence of sampled model calls and the reason for a final value is hard to reconstruct. Vision-language models (VLMs) such as Qwen2.5-VL \cite{bai2025qwen25vl} read the page image together with a requested output schema and are strong single-call extractors on receipts. A single call, however, returns one value per field without a record of where it came from or whether another reading of the page disagrees. We use a local VLM both as a baseline and as the vision fallback inside the OCR-LLM branch.
+Agentic methods such as ReAct \cite{react2023} let a model interleave reasoning with actions and revise intermediate results. They can correct errors, but the result depends on a sequence of sampled model calls and the reason for a final value is hard to reconstruct. Vision-language models (VLMs) such as Qwen2.5-VL \cite{bai2025qwen25vl} read the page image together with a requested output schema and are strong single-call extractors on receipts. A single call, however, returns one value per field without a record of where it came from or whether another reading of the page disagrees. We use a local VLM both as a baseline and as the vision fallback inside the OCR-LLM branch.
 
 \subsection{Combining Multiple Extractors}
 
-Combining the outputs of several systems is well established. Ensemble methods reduce error by voting or averaging over members \cite{dietterich2000ensemble}, and ROVER \cite{fiscus1997rover} aligns the outputs of several speech recognisers and votes word by word, optionally weighted by confidence. Such schemes assume members of comparable quality or calibrated scores. Neither holds for an OCR-free generator and an OCR-text extractor, whose errors differ in kind and whose confidences are not comparable \cite{guo2017calibration}. Research on data provenance distinguishes why a value appears in an output from where it was copied from \cite{buneman2001provenance}; this distinction motivates our per-field audit record, which stores for every fused value the branch it came from and the rule that selected it.
+Combining the outputs of several systems is well established. ROVER \cite{fiscus1997rover}, for example, aligns the outputs of several speech recognisers and votes word by word, optionally weighted by confidence. Such schemes assume members of comparable quality or calibrated scores. Neither holds for an OCR-free generator and an OCR-text extractor, whose errors differ in kind and whose confidences are not comparable \cite{guo2017calibration}. Research on data provenance distinguishes why a value appears in an output from where it was copied from \cite{buneman2001provenance}; this distinction motivates our per-field audit record, which stores for every fused value the branch it came from and the rule that selected it.
 
 \subsection{Schema Matching and Retrieval}
 
@@ -92,7 +92,7 @@ Matching an incoming set of fields to a known schema is a classical database pro
 
 \subsection{Parameter-Efficient Adaptation}
 
-Adapters \cite{houlsby2019adapters} insert small trainable bottleneck layers into a frozen network, and LoRA \cite{hu2022lora} learns low-rank updates to the attention weights that can be merged into them after training. QLoRA \cite{dettmers2023qlora} combines LoRA with a quantised frozen base to fine-tune large models on a single GPU, and He et al. \cite{he2022unified} show that adapters, prefix tuning and LoRA are instances of one design space. These methods have been studied mainly for language models. Their use for layout-aware document encoders across document styles with heterogeneous label sets, where one frozen base serves several style-specific adapters, has received little study.
+Adapters \cite{houlsby2019adapters} insert small trainable bottleneck layers into a frozen network, and LoRA \cite{hu2022lora} learns low-rank updates to the attention weights that can be merged into them after training. Both have been studied mainly for language models. Their use for layout-aware document encoders across document styles with heterogeneous label sets, where one frozen base serves several style-specific adapters, has received little study.
 
 % -----------------------------------------------------------------------
 %  III. IDENTIFIED GAPS AND PROBLEM STATEMENT
@@ -387,15 +387,7 @@ We presented a schema-aware framework that reconciles an OCR-free and an OCR-gro
 \section{Limitations}
 \label{sec:limitations}
 
-\textbf{Evaluation scale.} The public benchmarks are receipt subsets of 100 and 50 documents with four to six fields each, evaluated in one run per configuration, so differences under 0.02 F1 are not resolved at this sample size. The multi-page set is small, synthetic and written by the authors; it reflects the intended contract use case but does not replace a public long-document benchmark. Qwen2.5-VL may have seen receipt corpora during pre-training, which can favour the VLM baseline.
-
-\textbf{Dependence on OCR.} Grounding can only keep what the OCR engine reads. Tesseract returns sparse text on CORD receipts, so grounding discards almost all Donut answers there, and the Donut-only and text-pass results on CORD measure OCR coverage more than the models themselves.
-
-\textbf{Hand-set policy rules.} The rules and thresholds of the fusion policy, such as the ten-word clause test, the confidence floor and the restriction of Donut fills to non-numeric fields, were set by hand on development documents. They are transparent but not learned, the clause test misfires on long addresses, and a new document domain may require the rules to be revisited.
-
-\textbf{Layout adapters.} The adapters are evaluated as a standalone layout component; the field extractors do not yet use their region labels, so the end-to-end results do not reflect them. FUNSD form labels also map unevenly onto the shared label space, which limits the Group~2 adapter on forms.
-
-\textbf{Schema registry and latency.} The retrieval curve is measured on 50 author-labelled queries over eight schemas. Latency was measured with the stages run one after the other on a single laptop GPU, and on CORD and the multi-page set the pipeline is slower than a single VLM call. All evaluated documents are in Latin script.
+The public benchmarks are receipt subsets of 100 and 50 documents evaluated in one run per configuration, so differences under 0.02 F1 are not resolved, and the multi-page set is small, synthetic and written by the authors. Grounding can keep only what the OCR engine reads, which limits it on CORD, where Tesseract output is sparse. The policy rules and thresholds were set by hand on development documents and may need revisiting for a new domain, as the clause test on long addresses shows. Finally, the layout adapters are evaluated as a standalone component and are not yet used by the field extractors.
 
 % -----------------------------------------------------------------------
 %  VIII. FUTURE WORK
@@ -403,7 +395,7 @@ We presented a schema-aware framework that reconciles an OCR-free and an OCR-gro
 \section{Future Work}
 \label{sec:future}
 
-Several directions follow from these limitations. The VLM, now a fallback inside the OCR-LLM branch, can enter the policy as a third evidence source, so that its strength on prominent single-page fields is used while its values remain subject to the same grounding and usability checks. Restricting the clause test to clause-type fields would remove the SROIE regression that the audit log attributes to it, and more generally the rule thresholds could be selected on validation data with the log as a guide. The region labels of the layout adapters can be passed to the field extractors, for example to restrict grounding to the table or heading region a field belongs to. Replacing Tesseract with a stronger OCR engine would increase how much of Donut's output grounding can retain, especially on dense receipts. Finally, we plan to evaluate on long multi-page documents with public annotations, such as Kleister \cite{stanislawek2021kleister} and CUAD \cite{cuad2021}, to measure latency with the two branches running concurrently, and to extend the adapters to multilingual forms such as XFUND \cite{xu2021layoutxlm}.
+The VLM, now a fallback inside the OCR-LLM branch, can enter the policy as a third evidence source, subject to the same grounding and usability checks. Restricting the clause test to clause-type fields would remove the SROIE regression that the audit log attributes to it. The region labels of the layout adapters can be passed to the field extractors, for example to restrict grounding to the region a field belongs to, and a stronger OCR engine would let grounding retain more of Donut's output. Finally, we plan to evaluate on long multi-page documents with public annotations, such as Kleister \cite{stanislawek2021kleister} and CUAD \cite{cuad2021}.
 
 % -----------------------------------------------------------------------
 %  REFERENCES
@@ -443,12 +435,12 @@ W.~Hwang, S.~Yun, D.~Han, and S.~Park,
 in \textit{Proc. European Conference on Computer Vision (ECCV)},
 2022, pp.~498--517.
 
-\bibitem{gptner2024}
+\bibitem{gptner2025}
 S.~Wang, X.~Sun, X.~Li, R.~Ouyang, F.~Wu, T.~Zhang,
-J.~Li, and G.~Wang,
+J.~Li, G.~Wang, and C.~Guo,
 ``GPT-NER: Named entity recognition via large language models,''
 in \textit{Findings of the Association for Computational Linguistics:
-NAACL 2024}, 2024, pp.~4488--4503.
+NAACL 2025}, 2025, pp.~4257--4275.
 
 \bibitem{bai2025qwen25vl}
 S.~Bai, K.~Chen, X.~Liu, J.~Wang, W.~Ge, S.~Song, K.~Dang, P.~Wang, S.~Wang, J.~Tang, H.~Zhong, Y.~Zhu, M.~Yang, Z.~Li, J.~Wan, P.~Wang, W.~Ding, Z.~Fu, Y.~Xu, J.~Ye, X.~Zhang, T.~Xie, Z.~Cheng, H.~Zhang, Z.~Yang, H.~Xu, and J.~Lin,
@@ -469,25 +461,12 @@ information extraction systems!''
 in \textit{Proc. 2013 Conference on Empirical Methods in Natural
 Language Processing (EMNLP)}, 2013, pp.~827--832.
 
-\bibitem{katti2018chargrid}
-A.~R.~Katti, C.~Reisswig, C.~Guder, S.~Brarda, S.~Bickel, J.~H\"ohne,
-and J.~B.~Faddoul,
-``Chargrid: Towards understanding 2D documents,''
-in \textit{Proc. 2018 Conference on Empirical Methods in Natural
-Language Processing (EMNLP)}, 2018, pp.~4459--4469.
-
 \bibitem{hong2022bros}
 T.~Hong, D.~Kim, M.~Ji, W.~Hwang, D.~Nam, and S.~Park,
 ``BROS: A pre-trained language model focusing on text and layout for
 better key information extraction from documents,''
 in \textit{Proc. AAAI Conference on Artificial Intelligence}, vol.~36,
 no.~10, 2022, pp.~10767--10775.
-
-\bibitem{appalaraju2021docformer}
-S.~Appalaraju, B.~Jasani, B.~U.~Kota, Y.~Xie, and R.~Manmatha,
-``DocFormer: End-to-end transformer for document understanding,''
-in \textit{Proc. IEEE/CVF International Conference on Computer Vision
-(ICCV)}, 2021, pp.~993--1003.
 
 \bibitem{wang2022lilt}
 J.~Wang, L.~Jin, and K.~Ding,
@@ -502,14 +481,6 @@ C.~Luo, C.~Cheng, Q.~Zheng, and C.~Yao,
 in \textit{Proc. IEEE/CVF Conference on Computer Vision and Pattern
 Recognition (CVPR)}, 2023, pp.~7092--7101.
 
-\bibitem{powalski2021tilt}
-R.~Powalski, {\L}.~Borchmann, D.~Jurkiewicz, T.~Dwojak, M.~Pietruszka,
-and G.~Pa{\l}ka,
-``Going full-TILT boogie on document understanding with
-text-image-layout transformer,''
-in \textit{Proc. International Conference on Document Analysis and
-Recognition (ICDAR)}, LNCS vol.~12822, 2021, pp.~732--747.
-
 \bibitem{lee2022formnet}
 C.-Y.~Lee, C.-L.~Li, T.~Dozat, V.~Perot, G.~Su, N.~Hua,
 J.~Ainslie, R.~Wang, Y.~Fujii, and T.~Pfister,
@@ -517,20 +488,6 @@ J.~Ainslie, R.~Wang, Y.~Fujii, and T.~Pfister,
 document information extraction,''
 in \textit{Proc. 60th Annual Meeting of the Association for
 Computational Linguistics (ACL)}, 2022, pp.~3735--3754.
-
-\bibitem{hwang2021cost}
-W.~Hwang, H.~Lee, J.~Yim, G.~Kim, and M.~Seo,
-``Cost-effective end-to-end information extraction for
-semi-structured document images,''
-in \textit{Proc. 2021 Conference on Empirical Methods in Natural
-Language Processing (EMNLP)}, 2021, pp.~3375--3383.
-
-\bibitem{yu2021pick}
-W.~Yu, N.~Lu, X.~Qi, P.~Gong, and R.~Xiao,
-``PICK: Processing key information extraction from documents using
-improved graph learning-convolutional networks,''
-in \textit{Proc. 25th International Conference on Pattern Recognition
-(ICPR)}, 2021, pp.~4363--4370.
 
 \bibitem{jaume2019funsd}
 G.~Jaume, H.~K.~Ekenel, and J.-P.~Thiran,
@@ -549,41 +506,17 @@ Z.~Huang, K.~Chen, J.~He, X.~Bai, D.~Karatzas, S.~Lu, and C.~V.~Jawahar,
 in \textit{Proc. International Conference on Document Analysis and
 Recognition (ICDAR)}, 2019, pp.~1516--1520.
 
-\bibitem{publaynet}
-X.~Zhong, J.~Tang, and A.~Jimeno-Yepes,
-``PubLayNet: Largest dataset ever for document layout analysis,''
-in \textit{Proc. International Conference on Document Analysis and
-Recognition (ICDAR)}, 2019, pp.~1015--1022.
-
-\bibitem{docbank}
-M.~Li, Y.~Xu, L.~Cui, S.~Huang, F.~Wei, Z.~Li, and M.~Zhou,
-``DocBank: A benchmark dataset for document layout analysis,''
-in \textit{Proc. 28th International Conference on Computational
-Linguistics (COLING)}, 2020, pp.~949--960.
-
 \bibitem{pfitzmann2022doclaynet}
 B.~Pfitzmann, C.~Auer, M.~Dolfi, A.~S.~Nassar, and P.~Staar,
 ``DocLayNet: A large human-annotated dataset for document-layout segmentation,''
 in \textit{Proc. 28th ACM SIGKDD Conference on Knowledge Discovery and
 Data Mining (KDD)}, 2022, pp.~3743--3751.
 
-\bibitem{binmakhashen2020}
-G.~M.~Binmakhashen and S.~A.~Mahmoud,
-``Document layout analysis: A comprehensive survey,''
-\textit{ACM Computing Surveys}, vol.~52, no.~6,
-Art.~109, pp.~1--36, 2020.
-
 \bibitem{smith2007tesseract}
 R.~Smith,
 ``An overview of the Tesseract OCR engine,''
 in \textit{Proc. 9th International Conference on Document Analysis and
 Recognition (ICDAR)}, 2007, pp.~629--633.
-
-\bibitem{davis2022dessurt}
-B.~Davis, B.~Morse, B.~Price, C.~Tensmeyer,
-C.~Wigington, and V.~Morariu,
-``End-to-end document recognition and understanding with Dessurt,''
-\textit{arXiv preprint arXiv:2203.16618}, 2022.
 
 \bibitem{lee2023pix2struct}
 K.~Lee, M.~Joshi, I.~R.~Turc, H.~Hu, F.~Liu, J.~M.~Eisenschlos,
@@ -592,13 +525,6 @@ U.~Khandelwal, P.~Shaw, M.-W.~Chang, and K.~Toutanova,
 understanding,''
 in \textit{Proc. 40th International Conference on Machine Learning
 (ICML)}, PMLR vol.~202, 2023, pp.~18893--18912.
-
-\bibitem{tang2023udop}
-Z.~Tang, Z.~Yang, G.~Wang, Y.~Fang, Y.~Liu, C.~Zhu, M.~Zeng, C.~Zhang,
-and M.~Bansal,
-``Unifying vision, text, and layout for universal document processing,''
-in \textit{Proc. IEEE/CVF Conference on Computer Vision and Pattern
-Recognition (CVPR)}, 2023, pp.~19254--19264.
 
 \bibitem{guo2017calibration}
 C.~Guo, G.~Pleiss, Y.~Sun, and K.~Q.~Weinberger,
@@ -610,13 +536,13 @@ in \textit{Proc. 34th International Conference on Machine Learning
 M.~Mathew, D.~Karatzas, and C.~V.~Jawahar,
 ``DocVQA: A dataset for VQA on document images,''
 in \textit{Proc. IEEE Winter Conference on Applications of Computer
-Vision (WACV)}, 2021, pp.~2200--2209.
+Vision (WACV)}, 2021, pp.~2199--2208.
 
 \bibitem{cuad2021}
 D.~Hendrycks, C.~Burns, A.~Chen, and S.~Ball,
 ``CUAD: An expert-annotated NLP dataset for legal contract review,''
-in \textit{Advances in Neural Information Processing Systems},
-vol.~34, 2021, pp.~13836--13849.
+in \textit{Proc. Neural Information Processing Systems Track on
+Datasets and Benchmarks}, vol.~1, 2021.
 
 \bibitem{stanislawek2021kleister}
 T.~Stanis{\l}awek, F.~Grali{\'n}ski, A.~Wr{\'o}blewska, D.~Lipi{\'n}ski,
@@ -640,27 +566,6 @@ and Y.~Cao,
 ``ReAct: Synergizing reasoning and acting in language models,''
 in \textit{Proc. International Conference on Learning
 Representations (ICLR)}, 2023.
-
-\bibitem{reflexion2023}
-N.~Shinn, F.~Cassano, A.~Gopinath, K.~Narasimhan, and S.~Yao,
-``Reflexion: Language agents with verbal reinforcement learning,''
-in \textit{Advances in Neural Information Processing Systems},
-vol.~36, 2023, pp.~8634--8652.
-
-\bibitem{selfrefine2023}
-A.~Madaan, N.~Tandon, P.~Gupta, S.~Hallinan, L.~Gao,
-S.~Wiegreffe, U.~Alon, N.~Dziri, S.~Prabhumoye,
-Y.~Yang, S.~Gupta, B.~P.~Majumder, K.~Hermann,
-S.~Welleck, A.~Yazdanbakhsh, and P.~Clark,
-``Self-Refine: Iterative refinement with self-feedback,''
-in \textit{Advances in Neural Information Processing Systems},
-vol.~36, 2023, pp.~46534--46594.
-
-\bibitem{dietterich2000ensemble}
-T.~G.~Dietterich,
-``Ensemble methods in machine learning,''
-in \textit{Proc. International Workshop on Multiple Classifier Systems
-(MCS)}, LNCS vol.~1857, 2000, pp.~1--15.
 
 \bibitem{fiscus1997rover}
 J.~G.~Fiscus,
@@ -700,25 +605,6 @@ S.~Wang, L.~Wang, and W.~Chen,
 ``LoRA: Low-rank adaptation of large language models,''
 in \textit{Proc. International Conference on Learning
 Representations (ICLR)}, 2022.
-
-\bibitem{dettmers2023qlora}
-T.~Dettmers, A.~Pagnoni, A.~Holtzman, and L.~Zettlemoyer,
-``QLoRA: Efficient finetuning of quantized LLMs,''
-in \textit{Advances in Neural Information Processing Systems},
-vol.~36, 2023, pp.~10088--10115.
-
-\bibitem{he2022unified}
-J.~He, C.~Zhou, X.~Ma, T.~Berg-Kirkpatrick, and G.~Neubig,
-``Towards a unified view of parameter-efficient transfer learning,''
-in \textit{Proc. International Conference on Learning
-Representations (ICLR)}, 2022.
-
-\bibitem{xu2021layoutxlm}
-Y.~Xu, T.~Lv, L.~Cui, G.~Wang, Y.~Lu, D.~Florencio, C.~Zhang, and
-F.~Wei,
-``LayoutXLM: Multimodal pre-training for multilingual visually-rich
-document understanding,''
-\textit{arXiv preprint arXiv:2104.08836}, 2021.
 
 \end{thebibliography}
 
