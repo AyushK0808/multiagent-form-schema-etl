@@ -95,12 +95,12 @@ Given a semi-structured PDF document, and a schema of typed fields along with th
 \section{System Architecture and Methodology}
 \label{sec:arch}
 
-\begin{figure}[htbp]
+\begin{figure*}[t]
     \centering
-    \includegraphics[width=0.85\columnwidth]{architecture.pdf}
-    \caption{Pipeline architecture. The LoRA layout adapters (dashed) are evaluated on their own and are not used by the extraction branches.}
+    \includegraphics[width=0.92\textwidth]{architecture_wide.pdf}
+    \caption{Pipeline architecture. Ingestion feeds the eight orchestrator stages; the two extraction branches of stage~2 run in parallel and are reconciled in stage~3. The LoRA layout adapters (dashed) are selected in stage~1 but evaluated on their own and not used by the extraction branches.}
     \label{fig:system_architecture}
-\end{figure}
+\end{figure*}
 
 This pipeline has eight stages of extraction. Each stage passes a shared state from previous stage(s) to next (including any error it encounters), consisting of the blocks of documents being ingested, the image of the rendered page, the adapters that have been chosen for use, the results from the two extractors that were run to produce an extraction bundle, the fusion of policies applied to the output of the two extractors, the final resolved schema after all of the above steps are done, validation outcomes for each field after validation was run, a reference key for storing the data to be stored and any accumulated errors. An adapter group is selected once from the identified or retrieved schema name; in the evaluated build the selected adapter is carried in the state but is not consumed by either extraction branch, so the end-to-end results below do not measure the adapters. Each stage will process exceptions independently. So if there is a problem in one stage then subsequent stages can continue with a partial state instead of failing completely.
 
@@ -232,7 +232,7 @@ Storage & SQLite (dynamic schema) \\
 
 \subsection{Training Configuration and Results}
 
-Table~\ref{tab:hyperparams} presents the settings used for both LoRA groups; a cosine learning-rate schedule with 6\% warmup was used. Both groups train quickly (Fig.~\ref{fig:training_curves}): validation macro-F1 is within about 0.05 of its final value after four to five epochs. Table~\ref{tab:lora_results} reports validation and held-out test results as mean $\pm$ standard deviation over three seeds, together with a baseline that freezes the whole backbone and trains only the token-classification head (same data, seeds, schedule and early stopping).
+Table~\ref{tab:hyperparams} presents the settings used for both LoRA groups; a cosine learning-rate schedule with 6\% warmup was used. Both groups train quickly (Figs.~\ref{fig:training_curves}--\ref{fig:ft_classcurves}): validation macro-F1 is within about 0.05 of its final value after four to five epochs. Table~\ref{tab:lora_results} reports validation and held-out test results as mean $\pm$ standard deviation over three seeds, together with a baseline that freezes the whole backbone and trains only the token-classification head (same data, seeds, schedule and early stopping).
 
 \begin{table}[htbp]
 \centering
@@ -243,7 +243,7 @@ Table~\ref{tab:hyperparams} presents the settings used for both LoRA groups; a c
 \input{tab_lora}
 \end{table}
 
-LoRA adapters reach a competitive macro-F1 while updating about 1\% of the parameters, and clearly improve on the frozen-backbone head (Table~\ref{tab:lora_results}): test macro-F1 rises from 0.706 to 0.774 for Group~1 and from 0.550 to 0.739 for Group~2 (the Group~2 frozen baseline was trained with one seed only, for cost). Seed-to-seed variation of the adapters is small (standard deviation at most 0.008). On the held-out test sets, the Group~1 adapter reaches a macro-F1 of 0.774 and the Group~2 adapter 0.739, both lower than on validation. We do not claim state-of-the-art layout analysis: the label space is coarse and the numbers are not comparable to published results under the original dataset protocols. Per-class results show where macro-F1 is lost. For Group~1 the weakest class is list item (test F1 0.551), and for Group~2 captions (0.527) and list items (0.574), whereas paragraphs (0.90--0.94), tables (0.93) and, for Group~1, headings (0.87) are well recognised. Group~2 is dominated by DocLayNet; on FUNSD alone (50 forms) its macro-F1 is only 0.24, so the adapter should not be read as a strong form-understanding model. Cross-group results (Table~\ref{tab:crossgroup}) show that the adapters are specialised: on the other group's test set, macro-F1 falls to 0.195 (Group~1 adapter) and 0.128 (Group~2 adapter), which supports keeping one adapter per document style and routing between them.
+LoRA adapters reach a competitive macro-F1 while updating about 1\% of the parameters, and clearly improve on the frozen-backbone head (Table~\ref{tab:lora_results}): test macro-F1 rises from 0.706 to 0.774 for Group~1 and from 0.550 to 0.739 for Group~2 (the Group~2 frozen baseline was trained with one seed only, for cost). Seed-to-seed variation of the adapters is small (standard deviation at most 0.008). On the held-out test sets, the Group~1 adapter reaches a macro-F1 of 0.774 and the Group~2 adapter 0.739, both lower than on validation. We do not claim state-of-the-art layout analysis: the label space is coarse and the numbers are not comparable to published results under the original dataset protocols. Per-class results (Figs.~\ref{fig:perclass} and~\ref{fig:ft_gain}) show where macro-F1 is lost. For Group~1 the weakest class is list item (test F1 0.551), and for Group~2 captions (0.527) and list items (0.574), whereas paragraphs (0.90--0.94), tables (0.93) and, for Group~1, headings (0.87) are well recognised. Group~2 is dominated by DocLayNet; on FUNSD alone (50 forms) its macro-F1 is only 0.24, so the adapter should not be read as a strong form-understanding model. Cross-group results (Table~\ref{tab:crossgroup}) show that the adapters are specialised: on the other group's test set, macro-F1 falls to 0.195 (Group~1 adapter) and 0.128 (Group~2 adapter), which supports keeping one adapter per document style and routing between them (Fig.~\ref{fig:ft_cross}).
 
 \begin{table}[htbp]
 \centering
@@ -280,9 +280,44 @@ Numerical precision & bf16 \\
 
 \begin{figure}[htbp]
     \centering
+    \includegraphics[width=0.9\columnwidth]{fig_perclass.pdf}
+    \caption{Per-class test F1 of the LoRA adapters (mean $\pm$ std over three seeds). Group~1 reports no table or caption class.}
+    \label{fig:perclass}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
     \includegraphics[width=0.75\columnwidth]{training_curves}
     \caption{Validation macro-F1 per epoch for the LoRA adapters of Groups~1 and~2; one line per seed.}
     \label{fig:training_curves}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{fig_ft_loss.pdf}
+    \caption{Training (solid) and validation (dashed) loss per epoch, mean over seeds, for the LoRA adapters and the frozen-backbone head. The adapters reach a clearly lower validation loss, and the frozen head plateaus early, which indicates limited capacity rather than overfitting.}
+    \label{fig:ft_loss}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{fig_ft_classcurves.pdf}
+    \caption{Validation F1 of each layout class per epoch for the LoRA adapters (seed means). Paragraphs and tables are learned within a few epochs; list items, captions and headings improve more slowly.}
+    \label{fig:ft_classcurves}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{fig_ft_gain.pdf}
+    \caption{Per-class test F1 gain of the LoRA adapters over the frozen-backbone head. The largest gains are on the classes the frozen head handles worst: Group~2 list items ($+0.49$, from 0.081 to 0.574) and captions ($+0.23$); for Group~1 the gain is largest on headings ($+0.17$).}
+    \label{fig:ft_gain}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.7\columnwidth]{fig_ft_cross.pdf}
+    \caption{Test macro-F1 of each adapter on each group's test set (mean over three seeds; values as in Table~\ref{tab:crossgroup}). Off-diagonal performance drops to 0.195 and 0.128.}
+    \label{fig:ft_cross}
 \end{figure}
 
 \subsection{End-to-End Extraction Performance}
@@ -312,6 +347,22 @@ Full pipeline   & \textbf{0.980} & \textbf{0.973} & 0.801 & 0.547 & 0.836 & \tex
 
 Table~\ref{tab:e2e_aggregate} gives the main result, and it is mixed. The full pipeline is within 0.02 F1 of its OCR-LLM branch on every set (below it on SROIE, above it on CORD, equal on the synthetic set), so the fusion does not add accuracy on top of the better of its two specialist branches. It is far from the VLM on SROIE (0.801 against 0.992) and level with it on CORD (0.836 against 0.843) and on the synthetic set (0.980 against 0.973). A 7B vision-language model that reads the page and the schema directly is therefore the strongest single extractor in our setting, and the specialist stack does not close the gap. The synthetic set is close to ceiling for every strong system, so it cannot separate components and is reported as a sanity check.
 
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{fig_perfield.pdf}
+    \caption{Per-field token-overlap F1 on SROIE and CORD for the VLM, the OCR-LLM branch and the full pipeline. The pipeline tracks its OCR-LLM branch field by field; the gap to the VLM is concentrated in SROIE's company, address and total fields and in CORD's credit-card amount.}
+    \label{fig:perfield}
+\end{figure*}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{fig_ecdf.pdf}
+    \caption{Empirical distribution of per-document F1. On SROIE the VLM never falls below 0.85 and 85\% of its documents score at least 0.99, against 26\% and 24\% for the OCR-LLM branch and the full pipeline, whose lower tails reach 0.16 and 0.21. On CORD the three curves nearly coincide.}
+    \label{fig:ecdf}
+\end{figure}
+
+Figures~\ref{fig:perfield} and~\ref{fig:ecdf} show where the difference lies. The pipeline follows its OCR-LLM branch on almost every field, so the aggregate gap on SROIE is not a few bad documents: the median per-document F1 is 1.00 for the VLM, 0.89 for the OCR-LLM branch and 0.85 for the pipeline, and 7--8\% of SROIE receipts score 0.5 or less with the OCR-based systems against none with the VLM. On CORD the distributions are almost the same for all three systems (median 0.857 each).
+
 \subsubsection{Ablation}
 
 \begin{table}[t]
@@ -334,19 +385,40 @@ Full pipeline                              & 0.801 & 0.836 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:ablation} shows that only one component has a measurable effect. Grounding Donut answers in the OCR text adds 0.031 F1 on SROIE and 0.011 on CORD. Letting Donut fill every empty field, numeric ones included, lowers CORD F1 from 0.836 to 0.810 and raises the hallucination rate from 0.148 to 0.192, which is why the default accepts Donut-only values for non-numeric fields only; this default was fixed before the test runs, and on these sets it coincides with disabling Donut fills altogether. The schema-agent repair, normalization and spatial rule each change F1 by at most 0.002 and cannot be distinguished from noise at these sample sizes.
+Table~\ref{tab:ablation} shows that only one component has a measurable effect. Grounding Donut answers in the OCR text adds 0.031 F1 on SROIE and 0.011 on CORD. Letting Donut fill every empty field, numeric ones included, lowers CORD F1 from 0.836 to 0.810 and raises the hallucination rate from 0.148 to 0.192, which is why the default accepts Donut-only values for non-numeric fields only; this default was fixed before the test runs, and on these sets it coincides with disabling Donut fills altogether. The schema-agent repair, normalization and spatial rule each change F1 by at most 0.002 and cannot be distinguished from noise at these sample sizes (Fig.~\ref{fig:ablation}).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{fig_ablation.pdf}
+    \caption{Change in F1 relative to the full pipeline for each ablated variant (same data as Table~\ref{tab:ablation}). Only removing grounding and letting Donut fill every empty field move the score visibly.}
+    \label{fig:ablation}
+\end{figure}
 
 \subsubsection{Failure Analysis}
 
 On SROIE the gap to the VLM comes from the free-text and amount fields. Per-field F1 for the full pipeline against the VLM is 0.76 against 0.99 for address, 0.77 against 0.99 for company and 0.76 against 1.00 for total, while date is close (0.92 against 0.99, with an exact-match rate of 0.57 for every system, a date-format effect). The OCR-LLM branch is the default in the fusion policy, so its errors on these fields carry through: the evidence rules override it only when its value is unparseable, duplicated across fields or clause-like, and a wrong but well-formed address or total is none of these. On CORD the pipeline and the VLM differ on one field only, credit-card amount (0.89 against 1.00, eight receipts). Both share the hardest fields, tax (0.74) and subtotal (0.78).
 
-The hallucination rates on CORD (0.148 for the pipeline, 0.151 for the OCR-LLM branch, 0.135 for the VLM) are dominated by one field. Of the 26 predictions of the VLM that fall where the gold value is empty, 18 are subtotals and 16 of those copy another gold field of the same receipt, almost always the total: the receipt prints no subtotal line, and the model fills the field from the total. We report the rate as measured; excluding the subtotal field it falls to 5.6\% for the VLM. On CORD, EM equals recall for every system because every field is a single numeric token, so token overlap scores each field 0 or 1.
+The hallucination rates on CORD (0.148 for the pipeline, 0.151 for the OCR-LLM branch, 0.135 for the VLM) are dominated by one field (Fig.~\ref{fig:halluc}). Of the 26 predictions of the VLM that fall where the gold value is empty, 18 are subtotals and 16 of those copy another gold field of the same receipt, almost always the total: the receipt prints no subtotal line, and the model fills the field from the total. We report the rate as measured; excluding the subtotal field it falls to 5.6\% for the VLM. On CORD, EM equals recall for every system because every field is a single numeric token, so token overlap scores each field 0 or 1.
 
 CORD also exposes the OCR dependence of the pipeline. Tesseract returns only about 10 text blocks per receipt (5 of the 56 cached receipts have none), so grounding discards almost every Donut answer, and the Donut-only and text-pass rows of Table~\ref{tab:e2e_aggregate} are limited by OCR and are not a verdict on those models in isolation. Donut itself produced about six non-empty fields per receipt before grounding. The VLM, which reads the image, is not affected.
 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{fig_halluc.pdf}
+    \caption{CORD: predictions made where the gold value is empty, per field and system (50 receipts). Subtotal accounts for 18 values in every system; tax adds five and total two; the pipeline and the OCR-LLM branch also add two credit-card amounts and the VLM none.}
+    \label{fig:halluc}
+\end{figure}
+
 \subsubsection{Latency}
 
-We timed 15 documents (5 per dataset, one warm-up document discarded) on the laptop used for training, with response caching disabled. The Qwen2.5-VL-7B model runs partly from system memory (about 14\% CPU, 86\% GPU) on the 8\,GB card. Median per-stage times are: OCR 1.2\,s; Donut 8.5\,s (6.6\,s on SROIE, 8.5\,s on CORD, 17\,s on the multi-page synthetic documents); OCR-LLM branch 19.9\,s; fusion under 10\,ms. The OCR-LLM branch takes about 6\,s when the text pass fills every field and about 20\,s when it calls the vision model for the remainder. A standalone VLM call takes about 20\,s per page (15.8--22.3\,s on SROIE, 19.5--20.6\,s on the synthetic set). The full pipeline without a separate VLM branch has a median of 29.0\,s per document, against about 20\,s for the VLM alone. One receipt took 126.8\,s in the OCR-LLM branch because the model looped and was reloaded. Two measurement caveats apply: when the OCR-LLM branch had just issued the same request, Ollama answered the follow-up VLM call from its prompt cache in about 2\,s, and we do not report those rows as VLM latency; and with 15 documents the means are sensitive to outliers, so we give medians. The pipeline is thus not faster than the VLM, and its cost is dominated by Donut and by the OCR-LLM branch's own use of the VLM.
+We timed 15 documents (5 per dataset, one warm-up document discarded) on the laptop used for training, with response caching disabled. The Qwen2.5-VL-7B model runs partly from system memory (about 14\% CPU, 86\% GPU) on the 8\,GB card. Median per-stage times are: OCR 1.2\,s; Donut 8.5\,s (6.6\,s on SROIE, 8.5\,s on CORD, 17\,s on the multi-page synthetic documents); OCR-LLM branch 19.9\,s; fusion under 10\,ms. The OCR-LLM branch takes about 6\,s when the text pass fills every field and about 20\,s when it calls the vision model for the remainder. A standalone VLM call takes about 20\,s per page (15.8--22.3\,s on SROIE, 19.5--20.6\,s on the synthetic set). The full pipeline without a separate VLM branch has a median of 29.0\,s per document, against about 20\,s for the VLM alone. One receipt took 126.8\,s in the OCR-LLM branch because the model looped and was reloaded. Two measurement caveats apply: when the OCR-LLM branch had just issued the same request, Ollama answered the follow-up VLM call from its prompt cache in about 2\,s, and we do not report those rows as VLM latency; and with 15 documents the means are sensitive to outliers, so we give medians. The pipeline is thus not faster than the VLM, and its cost is dominated by Donut and by the OCR-LLM branch's own use of the VLM (Fig.~\ref{fig:latency}).
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\columnwidth]{fig_latency.pdf}
+    \caption{Median seconds per document: pipeline stages (stacked, no separate VLM branch) against a standalone VLM call. CORD VLM timings are omitted because Ollama answered them from its prompt cache.}
+    \label{fig:latency}
+\end{figure}
 
 \subsubsection{Limitations of the Evaluation}
 

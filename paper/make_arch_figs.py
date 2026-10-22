@@ -55,6 +55,54 @@ def architecture() -> None:
     plt.close(fig)
 
 
+def line(ax, pts, dashed=False):
+    xs, ys = zip(*pts)
+    ax.plot(xs, ys, color=GREY if dashed else INK, lw=1.0, ls="--" if dashed else "-", solid_capstyle="butt")
+
+
+def architecture_wide() -> None:
+    """Two-column figure: ingestion, the eight orchestrator stages, and the parallel branches in detail."""
+    fig, ax = canvas(7.1, 4.6)
+    s = 7.5
+    # top row
+    box(ax, 0.6, 3.3, 0.9, 0.5, "PDF\ndocument", size=s)
+    box(ax, 1.85, 3.3, 1.4, 0.8, "Ingestion\nnative text or\nTesseract OCR,\nword confidence", size=s)
+    box(ax, 3.4, 3.3, 1.3, 0.8, "1  Adapter routing\nschema name ->\nadapter group", fill=ACCENT, size=s)
+    box(ax, 3.4, 4.25, 1.3, 0.45, "LoRA layout\nadapters*", dashed=True, size=s)
+    arrow(ax, (1.05, 3.3), (1.15, 3.3))
+    arrow(ax, (2.55, 3.3), (2.75, 3.3))
+    arrow(ax, (3.4, 4.02), (3.4, 3.7), dashed=True)
+    # parallel panel
+    ax.add_patch(FancyBboxPatch((4.4, 2.1), 2.65, 2.1, boxstyle="round,pad=0.02,rounding_size=0.06",
+                                fc="white", ec=INK, lw=1.0, ls="-"))
+    ax.text(5.725, 4.05, "2  Parallel extraction", ha="center", va="center", fontsize=s + 0.5, color=INK, weight="bold")
+    box(ax, 5.05, 3.4, 1.15, 0.55, "Donut\nOCR-free, one\nquestion per field", size=s - 0.5)
+    box(ax, 6.4, 3.4, 1.15, 0.55, "OCR-LLM\ntext LLM over\nOCR text", size=s - 0.5)
+    box(ax, 5.05, 2.65, 1.15, 0.45, "Ground answers\nin OCR text", fill=ACCENT, size=s - 0.5)
+    box(ax, 6.4, 2.65, 1.15, 0.45, "VLM fallback\nfor empty fields", fill=ACCENT, size=s - 0.5)
+    arrow(ax, (5.05, 3.12), (5.05, 2.88))
+    arrow(ax, (6.4, 3.12), (6.4, 2.88))
+    ax.text(5.725, 2.25, "branches run in parallel", ha="center", fontsize=6.5, color=GREY)
+    arrow(ax, (4.05, 3.3), (4.4, 3.3))
+    # bottom row
+    names = ["3  Policy\nfusion\nevidence rules", "4  Schema\nrepair\nLLM agent", "5  Schema\nresolve\nregistry match",
+             "6  Validation\ntype and range\nchecks", "7  Persist\nSQLite", "8  Finalize\nfields, scores,\nissue log"]
+    xs = [0.6 + 1.16 * i for i in range(6)]
+    for i, (x, t) in enumerate(zip(xs, names)):
+        box(ax, x, 1.0, 1.0, 0.8, t, fill=ACCENT if i == 0 else FILL, size=6.3)
+        if i:
+            arrow(ax, (xs[i - 1] + 0.5, 1.0), (x - 0.5, 1.0))
+    line(ax, [(5.725, 2.1), (5.725, 1.8), (0.6, 1.8)])
+    arrow(ax, (0.6, 1.8), (0.6, 1.4))
+    box(ax, 2.92, 0.2, 1.3, 0.32, "Schema registry", size=s - 0.5)
+    arrow(ax, (2.92, 0.36), (2.92, 0.6))
+    ax.text(0.05, 4.25, "*evaluated on its own; selected\nbut not consumed by the\nextraction branches", fontsize=6.5, color=GREY, va="center")
+    ax.text(7.0, 0.2, "Every stage records its errors in the shared state;\nlater stages continue on the partial state.",
+            fontsize=6.5, color=GREY, ha="right", va="center")
+    fig.savefig(OUT / "architecture_wide.pdf", bbox_inches="tight")
+    plt.close(fig)
+
+
 def parallel() -> None:
     fig, ax = canvas(3.6, 3.7)
     box(ax, 1.8, 3.4, 2.4, 0.4, "Page images + OCR blocks")
@@ -74,5 +122,6 @@ def parallel() -> None:
 
 if __name__ == "__main__":
     architecture()
+    architecture_wide()
     parallel()
-    print("wrote architecture.pdf, parallel_ex.pdf")
+    print("wrote architecture.pdf, architecture_wide.pdf, parallel_ex.pdf")
