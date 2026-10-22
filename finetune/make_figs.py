@@ -147,7 +147,8 @@ def class_gain(results: Path, out: Path) -> None:
         ax.bar(xs, ys, 0.38, color=color, label=group.replace("_", " ").title())
     ax.axhline(0, color="black", lw=0.8)
     ax.set_xticks(range(len(classes)))
-    ax.set_xticklabels([c.replace("_", "\n") for c in classes], fontsize=7)
+    short = {"paragraph": "para-\ngraph", "list_item": "list\nitem"}
+    ax.set_xticklabels([short.get(c, c) for c in classes], fontsize=7)
     ax.set_ylabel("Test F1 gain over frozen head")
     ax.grid(alpha=0.3)
     ax.legend(frameon=False, fontsize=7, loc="upper left")

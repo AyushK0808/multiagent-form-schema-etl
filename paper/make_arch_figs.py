@@ -68,7 +68,7 @@ def architecture_wide() -> None:
     box(ax, 0.6, 3.3, 0.9, 0.5, "PDF\ndocument", size=s)
     box(ax, 1.85, 3.3, 1.4, 0.8, "Ingestion\nnative text or\nTesseract OCR,\nword confidence", size=s)
     box(ax, 3.4, 3.3, 1.3, 0.8, "1  Adapter routing\nschema name ->\nadapter group", fill=ACCENT, size=s)
-    box(ax, 3.4, 4.25, 1.3, 0.45, "LoRA layout\nadapters*", dashed=True, size=s)
+    box(ax, 3.4, 4.25, 1.3, 0.45, "LoRA layout\nadapters", dashed=True, size=s)
     arrow(ax, (1.05, 3.3), (1.15, 3.3))
     arrow(ax, (2.55, 3.3), (2.75, 3.3))
     arrow(ax, (3.4, 4.02), (3.4, 3.7), dashed=True)
@@ -96,7 +96,6 @@ def architecture_wide() -> None:
     arrow(ax, (0.6, 1.8), (0.6, 1.4))
     box(ax, 2.92, 0.2, 1.3, 0.32, "Schema registry", size=s - 0.5)
     arrow(ax, (2.92, 0.36), (2.92, 0.6))
-    ax.text(0.05, 4.25, "*evaluated on its own; selected\nbut not consumed by the\nextraction branches", fontsize=6.5, color=GREY, va="center")
     ax.text(7.0, 0.2, "Every stage records its errors in the shared state;\nlater stages continue on the partial state.",
             fontsize=6.5, color=GREY, ha="right", va="center")
     fig.savefig(OUT / "architecture_wide.pdf", bbox_inches="tight")

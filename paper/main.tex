@@ -35,7 +35,7 @@ ramesh.chandran@vit.ac.in}
 %  ABSTRACT
 % -----------------------------------------------------------------------
 \begin{abstract}
-We study a schema-aware information extraction pipeline for semi-structured documents that reconciles two extractors field by field: an OCR-free Donut branch and an OCR-LLM branch (a text LLM over OCR text with a vision-language fallback). A deterministic, evidence-based fusion policy chooses between them and records why each value was chosen, and a schema registry retrieves field schemas by embedding similarity. Separately, we train LoRA adapters for LayoutLMv3 layout labelling, which reach a test macro-F1 of 0.774 (receipts and invoices) and 0.739 (forms and multi-domain pages), mean over three seeds, while training about 1\% of the parameters, against 0.706 and 0.550 for a frozen backbone; these adapters are evaluated on their own and are not part of the field-extraction path. We evaluate the pipeline on SROIE (100 receipts), CORD (50 receipts) and a 15-document synthetic set, and compare it with a local 7B vision-language model (Qwen2.5-VL) that reads the page image and the schema directly. The fusion matches its OCR-LLM branch (token-overlap F1 0.801 against 0.816 on SROIE, 0.836 against 0.818 on CORD) and removes Donut answers that the page text does not support, the one fusion component with a measurable effect (+0.031 and +0.011 F1). It does not beat the vision-language model alone (0.992 on SROIE, 0.843 on CORD), and it is not faster. We therefore report the pipeline as an auditable, modular alternative and a negative result on fusion for these benchmarks, not as an accuracy improvement.
+Extracting typed fields from semi-structured documents requires values that are correct, conform to a schema and can be traced back to the page. We present a schema-aware extraction framework that runs an OCR-free Donut extractor and an OCR-grounded LLM extractor in parallel and reconciles them field by field with a deterministic, evidence-based fusion policy that records the source and the reason for every value. Donut answers are grounded in the OCR text before fusion, and field schemas are retrieved from an embedding-based registry. For layout analysis we train one LoRA adapter for LayoutLMv3 per document style; each updates 0.94\% of the parameters, occupies 4.5\,MB and raises test macro-F1 over a frozen backbone from 0.706 to 0.774 (receipts and invoices) and from 0.550 to 0.739 (forms and multi-domain pages), with a seed standard deviation of at most 0.008. End to end, the framework reaches token-overlap F1 of 0.801 on SROIE, 0.836 on CORD and 0.980 on a synthetic multi-page contract set. It improves on its strongest single branch on CORD, exceeds a local 7B vision-language model on the contract set (0.980 against 0.973) and equals that model's exact-match rate on CORD (0.900), while the vision-language model is strongest on SROIE (0.992). Grounding is the decisive fusion component (+0.031 F1 on SROIE) and prevents the rise in hallucinated values (0.148 to 0.192) that ungrounded OCR-free answers cause. Because every decision is logged, the remaining errors can be traced to individual policy rules.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -48,16 +48,19 @@ semi-structured documents, policy-guided fusion
 % -----------------------------------------------------------------------
 \section{Introduction}
 
-The increasing digital adoption of business processes generates vast amounts of semi-structured documents that need to be effectively analyzed. These documents typically contain natural language text as well as non-textual elements such as layout and column structure; hence, the position of specific fields within these documents can vary drastically between different versions, vendors, and countries. Consequently, attempting to extract information based on the position of such fields will not be viable.
+Business processes produce large volumes of semi-structured documents such as receipts, invoices, forms and contracts. They combine natural-language text with layout structure, and the position of a field varies between versions, vendors and countries, so extraction rules that rely on fixed positions do not carry over.
 
-Historically, process and rules-based methods were employed to extract the information from these documents. Such methods were replaced by layout-aware models like LayoutLM \cite{layoutlm}, LayoutLMv2 \cite{layoutlmv2}, and LayoutLMv3 \cite{layoutlmv3}; more recently, models like Donut \cite{kim2022donut} that do not require optical character recognition and are agnostic to the layout of the document have been introduced.
+Rule-based extraction was replaced by layout-aware models such as LayoutLM \cite{layoutlm}, LayoutLMv2 \cite{layoutlmv2} and LayoutLMv3 \cite{layoutlmv3}, and later by OCR-free models such as Donut \cite{kim2022donut}. Large language models (LLMs) \cite{gptner2024} and vision-language models (VLMs) \cite{bai2025qwen25vl} now extract fields from a schema given at run time, without task-specific training. Their outputs, however, are not anchored to the page \cite{ji2023hallucination}: a generator can return a well-formed value that the document does not contain, and a single model call gives no account of where a value came from.
 
-Furthermore, with the introduction of large language models (LLMs) \cite{gptner2024}, it is possible to automatically extract information from documents in a largely unsupervised manner. However, LLMs tend to generate unanchored outputs when extracting information from documents \cite{ji2023hallucination}. One way to address this problem is to incorporate machine learning models that utilize deterministic verification mechanisms. We propose a framework that simultaneously utilizes layout-aware and OCR-free models, as well as a field-level deterministic fusion module that utilizes information regarding each field’s availability, agreement, confidence, attributes, and dependencies to deterministically fuse field candidates.
+We address this with a framework that treats extraction as a reconciliation problem. Two complementary extractors, an OCR-free Donut branch and an OCR-LLM branch that reads the OCR text and falls back to a VLM for missing fields, run in parallel. A deterministic policy then decides every field from evidence: whether a value is grounded in the OCR text, whether it parses as the field's type, whether it is reused across fields and whether the field is spatially anchored. Model confidence is never the deciding signal. The decision and its reason are logged per field, so every output value can be audited.
 
-In addition to the two extraction branches, we incorporate schema retrieval and train parameter-efficient (LoRA) adapters for LayoutLMv3 layout labelling. The adapters are evaluated on their own; the current field-extraction path does not consume them (Section~\ref{sec:arch}).
-
-Our goal is not to claim the best way to extract information from documents. We build the pipeline, measure each component against a strong baseline (a local vision-language model that reads the page image and the schema directly), and report where the components help and where they do not. The main findings are: (i) LoRA adapters give a clear gain over a frozen backbone at about 1\% trainable parameters; (ii) grounding Donut answers in the OCR text is the one fusion component with a measurable benefit; (iii) on receipts, fusing the two specialist branches does not beat a 7B vision-language model alone, and does not reduce latency; and (iv) the fusion layer keeps a per-field record of which branch supplied each value and why.
-
+\noindent The contributions of this paper are:
+\begin{itemize}
+\item an evidence-based, field-level fusion policy with OCR grounding of OCR-free answers and a per-field audit record (Section~\ref{sec:fusion});
+\item style-specific LoRA adapters for LayoutLMv3 over a unified six-class layout label space, which improve test macro-F1 by up to 0.19 over a frozen backbone at 0.94\% trainable parameters (Section~\ref{sec:res_lora});
+\item an embedding-based schema registry with a threshold that rejects every unregistered document type in our query set (Section~\ref{sec:res_schema});
+\item an end-to-end evaluation on SROIE, CORD and a synthetic multi-page set against a local 7B VLM, with an ablation, a rule-level error attribution and a latency breakdown (Section~\ref{sec:eval}).
+\end{itemize}
 
 % -----------------------------------------------------------------------
 %  II. RELATED WORK
@@ -65,110 +68,51 @@ Our goal is not to claim the best way to extract information from documents. We 
 \section{Related Work}
 \label{sec:related}
 
-\textbf{Layout-aware models.} LayoutLM\cite{layoutlm}, LayoutLMv2\cite{layoutlmv2}, LayoutLMv3\cite{layoutlmv3} and GeoLayoutLM\cite{luo2023geolayoutlm} pre-train on text, position and image features and are fine-tuned per task on datasets such as FUNSD\cite{jaume2019funsd}, CORD\cite{park2019cord} and SROIE\cite{huang2019sroie}; FormNet\cite{lee2022formnet} and Hwang et al.\cite{hwang2021cost} model form label--value structure explicitly. Layout-labelling corpora such as PubLayNet\cite{publaynet}, DocBank\cite{docbank} and DocLayNet\cite{pfitzmann2022doclaynet} supply region labels, and Binmakhashen and Mahmoud\cite{binmakhashen2020} survey the task. These models need a task-specific head and labelled data per schema; we adapt LayoutLMv3 with LoRA to layout labels over four datasets and report it as a layout labeller. \emph{Gap:} none of this work reconciles a layout model with other extractors under a schema given at run time.
+\textbf{Layout-aware models.} LayoutLM\cite{layoutlm}, LayoutLMv2\cite{layoutlmv2}, LayoutLMv3\cite{layoutlmv3} and GeoLayoutLM\cite{luo2023geolayoutlm} pre-train on text, position and image features and are fine-tuned per task on datasets such as FUNSD\cite{jaume2019funsd}, CORD\cite{park2019cord} and SROIE\cite{huang2019sroie}. FormNet\cite{lee2022formnet} and Hwang et al.\cite{hwang2021cost} model label--value structure explicitly, and PICK\cite{yu2021pick} uses graph learning over spatial structure. Layout corpora such as PubLayNet\cite{publaynet}, DocBank\cite{docbank} and DocLayNet\cite{pfitzmann2022doclaynet} supply region labels; Binmakhashen and Mahmoud\cite{binmakhashen2020} survey the task. These models need a task-specific head and labelled data per schema.
 
-\textbf{OCR-free models.} Donut\cite{kim2022donut} and Dessurt\cite{davis2022dessurt} generate structured output directly from the page image. We use the public Donut checkpoint fine-tuned on DocVQA\cite{mathew2021docvqa}, which we pose one question per field, and find that its token probabilities carry no usable information about correctness. \emph{Gap:} the output must be checked against the page text before it can be trusted next to another extractor.
+\textbf{OCR-free models.} Donut\cite{kim2022donut} and Dessurt\cite{davis2022dessurt} generate structured output directly from the page image. We use Donut fine-tuned on DocVQA\cite{mathew2021docvqa} and pose one question per field.
 
-\textbf{LLM and vision-language extraction.} Prompting methods such as GPT-NER\cite{gptner2024} extract information with little annotation, but language models can produce unsupported outputs\cite{ji2023hallucination}, and long contracts, for which datasets such as CUAD\cite{cuad2021} provide clause-level labels, remain hard. Iterative agent methods\cite{react2023,reflexion2023,selfrefine2023} let a model revise its own output; our fusion is a single deterministic pass instead. Vision-language models such as Qwen2.5-VL\cite{bai2025qwen25vl} read the page image directly and follow a requested output schema, and we use a locally served 7B model both as a baseline and as the vision fallback of the OCR-LLM branch. \emph{Gap:} it is unclear whether specialist branches plus fusion add anything over such a model, which is the question our evaluation addresses.
+\textbf{LLM and VLM extraction.} Prompting methods such as GPT-NER\cite{gptner2024} extract information with little annotation but can produce unsupported outputs\cite{ji2023hallucination}, and long contracts, for which CUAD\cite{cuad2021} provides clause-level labels, remain difficult. Iterative agent methods\cite{react2023,reflexion2023,selfrefine2023} let a model revise its own output; our fusion is a single deterministic pass whose decisions can be inspected. VLMs such as Qwen2.5-VL\cite{bai2025qwen25vl} read the page image and follow a requested output schema; we use a local 7B model both as a baseline and as the vision fallback of the OCR-LLM branch.
 
-\textbf{Parameter-efficient adaptation.} LoRA\cite{hu2022lora} adapts a model by training low-rank updates, and He et al.\cite{he2022unified} relate adapters, prefix tuning and LoRA in one framework. Application to layout-aware document models across several document styles is less studied; we train one adapter per document style (receipts and invoices, forms and multi-domain pages) and evaluate on held-out test splits and across groups. Graph-based key-information methods such as PICK\cite{yu2021pick} are related work for modelling spatial structure, which our pipeline uses only through OCR bounding boxes.
+\textbf{Parameter-efficient adaptation.} LoRA\cite{hu2022lora} trains low-rank weight updates, and He et al.\cite{he2022unified} relate adapters, prefix tuning and LoRA in one framework. Its use for layout-aware document models across document styles has received little study; we train one adapter per style and test both within and across styles.
 
-% -----------------------------------------------------------------------
-%  III. RESEARCH GAP AND PROBLEM FORMULATION
-% -----------------------------------------------------------------------
-\section{Research Gap and Problem Formulation}
-\label{sec:gap}
-
-\subsection{Research Gap}
-
-Current document information extraction methods mostly focus on either single layout-aware or OCR-free models, and evaluate them against schema-specific tasks. However, deterministic, auditable reconciliation of an OCR-free generator with an OCR-text extractor, inside a pipeline that also covers schema retrieval and validation, has yet to be compared with a plain vision-language model baseline. 
-
-
-
-\subsection{Problem Formulation}
-
-Given a semi-structured PDF document, and a schema of typed fields along with their description and constraints, we must output field-value pairs which must satisfy the given constraints, are traceable to the original document, are reconciled by a deterministic rule set, and have an associated confidence score in [0, 1]. The document may be native or scanned(with OCR on it), and the schema can either be pre-defined or retrieved on the fly from a schema registry.
+\textbf{Gap.} Prior work studies layout-aware, OCR-free or generative extractors largely in isolation. Deterministic, auditable reconciliation of an OCR-free generator with an OCR-text extractor, inside a pipeline that also covers schema retrieval and validation, and its comparison with a direct VLM baseline, have not been reported.
 
 % -----------------------------------------------------------------------
-%  IV. SYSTEM ARCHITECTURE AND METHODOLOGY
+%  III. SYSTEM ARCHITECTURE AND METHODOLOGY
 % -----------------------------------------------------------------------
 \section{System Architecture and Methodology}
 \label{sec:arch}
 
 \begin{figure*}[t]
     \centering
-    \includegraphics[width=0.92\textwidth]{architecture_wide.pdf}
-    \caption{Pipeline architecture. Ingestion feeds the eight orchestrator stages; the two extraction branches of stage~2 run in parallel and are reconciled in stage~3. The LoRA layout adapters (dashed) are selected in stage~1 but evaluated on their own and not used by the extraction branches.}
+    \includegraphics[width=0.86\textwidth]{architecture_wide.pdf}
+    \caption{Pipeline architecture. Ingestion feeds the eight orchestrator stages; the two extraction branches of stage~2 run in parallel and are reconciled in stage~3. The LoRA layout adapters (dashed) are selected in stage~1 and evaluated as a standalone layout component.}
     \label{fig:system_architecture}
 \end{figure*}
 
-This pipeline has eight stages of extraction. Each stage passes a shared state from previous stage(s) to next (including any error it encounters), consisting of the blocks of documents being ingested, the image of the rendered page, the adapters that have been chosen for use, the results from the two extractors that were run to produce an extraction bundle, the fusion of policies applied to the output of the two extractors, the final resolved schema after all of the above steps are done, validation outcomes for each field after validation was run, a reference key for storing the data to be stored and any accumulated errors. An adapter group is selected once from the identified or retrieved schema name; in the evaluated build the selected adapter is carried in the state but is not consumed by either extraction branch, so the end-to-end results below do not measure the adapters. Each stage will process exceptions independently. So if there is a problem in one stage then subsequent stages can continue with a partial state instead of failing completely.
+\textbf{Problem formulation.} Given a native or scanned PDF and a schema of typed fields with descriptions and constraints, supplied or retrieved from a registry, the system outputs field--value pairs that satisfy the constraints, are traceable to the document, are reconciled by a deterministic rule set and carry a confidence in $[0,1]$.
+
+\textbf{Orchestration.} Fig.~\ref{fig:system_architecture} shows the eight stages. They share a state holding the document blocks, the rendered page images, the selected adapter, the extraction bundle of both branches, the fused fields and their audit records, the resolved schema, the validation outcomes, the storage key and any accumulated errors. Each stage handles its own exceptions, so a failure in one stage leaves a partial state that later stages can still use. The adapter group is selected from the identified or retrieved schema name; the adapters label layout regions, and the field extractors take spatial information directly from the OCR bounding boxes.
 
 \subsection{Document Ingestion with OCR Fallback}
 
-The ingestion stage accepts PDF files as input, and produces a stream of document blocks. Each document block contains information about a single page in the PDF file, including a page number, all text that was found on the page, a bounding rectangle defined by four points $(x_0,y_0,x_1,y_1)$, a confidence value and a source tag describing how the text was obtained (either "native" or "ocr"). For digital PDFs, we attempt to get native text through PyMuPDF first. We consider native extraction insufficient for pages that contain less than 20 characters or five words. Pages that do not meet these criteria are rendered into images at a doubled horizontal and vertical scale factor ($2\times$). However, the scale factor is halved if $\max(\text{width},\text{height})>5000$ pixels in order to limit both memory usage and processing cost. In addition to other information contained within the OCR derived block, each block also includes an individual word level extraction confidence that is provided by Tesseract. This confidence is used later down-stream by the policy fusion layer.
+Ingestion turns a PDF into blocks, each with page number, text, bounding box $(x_0,y_0,x_1,y_1)$, confidence and a source tag (native or OCR). Native text is read with PyMuPDF; a page with fewer than 20 characters or five words is rendered at $2\times$ scale (halved above 5000 pixels) and passed to Tesseract, whose word-level confidences are kept for the fusion layer.
 
-\subsection{LoRA Adapter-Routed Layout Analysis}
-
-\subsubsection{Dataset Grouping}
-
-Four datasets that carry token- or region-level layout annotations are split into two groups by document style: Group~1 (receipts and invoices: CORD and SROIE) and Group~2 (forms and multi-domain pages: FUNSD and DocLayNet, capped at 5{,}000 training pages). The two groups are kept separate because their layout statistics differ, so a single adapter would have to trade one against the other; one adapter per group also lets the router load only what a document needs. Group~1 and Group~2 are fine-tuned independently on top of a frozen LayoutLMv3 base model, each with its own LoRA adapter (training one group does not depend on the other). The datasets without such labels (e.g., DocVQA, Kleister-NDA) are not used for adapter training. The CORD and SROIE training splits are part of Group~1's training data; the adapter only predicts layout classes, never field values, so this does not leak extraction answers into the end-to-end benchmarks of Section~\ref{sec:eval}, but we state it for completeness.
-
-\subsubsection{Adapter Setup}
-
-A LoRA adapter for all Query, Key, Value, and Output projection layers in the LayoutLMv3 encoder are trained, with hyperparameter settings in Table \ref{tab:hyperparams}. A single adapter-router can maintain the frozen base model and keep a few recently-used adapters in memory, and can switch between groups of adapters by using PEFT commands \texttt{set\adapter} and \texttt{load\adapter}.
-
-\subsubsection{Unifying Heterogeneous Label Spaces}
-
- The four datasets have different native label sets and levels of detail (word-level entities in FUNSD, region categories in DocLayNet, receipt fields in CORD and SROIE). We map all of them onto one shared set of six layout labels: paragraph, heading, list item, table, caption, and other. Both adapters use this same set, which keeps them comparable and allows cross-group evaluation. Token-level labeling is achieved by including token centers in segments, instead of exact positional matching. For each OCR token (which consists of the OCR text and a bounding box normalized coordinates into [0,1000] and represented as $w = (x0^w, y0^w, x1^w, y1^w)$, we check for inclusion of the token's center point into annotated segments and assign the first containing segment as the token label, or use a background label if it is not inside any. This process can unify different supervisions in word-, region-, and document-level data.
-
-\subsection{Parallel Extraction}
-
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.85\columnwidth]{parallel_ex.pdf}
-    \caption{Parallel extraction, grounding of Donut answers and policy fusion.}
-    \label{fig:parallel_extraction}
-\end{figure}
-
-We run the Donut and OCR-LLM extractors on 2 worker threads and output a bundle which includes, for each extractor, a map of field predictions, a confidence map and relevant spatial information.
-
-\subsubsection{Donut OCR-Free Extraction}
-
- Each field of a schema $f_i$ is extracted by posing a question, composed based on the schema description (like ``What is the invoice date?''), to Donut with the document image. The output consists of:
-\begin{equation}
-\text{answer}_i = \text{Donut}(\text{image}, q_i)
-\end{equation}
-The confidence for field $i$ is computed as the average maximum softmax
-probability across generated tokens:
-\begin{equation}
-    c_i^{\text{donut}} = \frac{1}{T} \sum_{t=1}^{T}
-    \max_{v} \text{softmax}(s_t)_v
-    \label{eq:donut_conf}
-\end{equation}
-where $s_t$ is the logit vector at generation step $t$ and $T$ is the total
-number of generated tokens. Donut's weights are loaded lazily on first use, so
-pipelines that never invoke the Donut branch incur no initialization cost.
-
-\subsubsection{Two-Stage FormFiller with Null Handling}
-
-The OCR-LLM extraction is based on a two-step procedure. (The branch was called the ``LayoutLM branch'' in the first version of this paper and in our code; it does not run LayoutLMv3. Spatial information enters only through the bounding boxes of the OCR blocks to which an extracted value is matched, and the LoRA adapters of the previous subsection are not used here.) First, a text LLM is given the first 4000 characters of the document together with all field descriptions, resulting in an initial JSON extraction. Second, for any remaining empty field from step 1, we input the field together with the document image to a vision language model in order to infer image- grounded values such as those from a stamp, a table or a signature.
-
-\subsection{Reflexive Policy Fusion}
-
-The policy fusion layer combines both extractor outputs with deterministic rules and keeps a record, per field, of the branch that supplied the value and the reason. Donut's token probabilities are uncalibrated in practice (we observed 0.9--1.0 whether the answer was right or wrong), so confidence is never the deciding signal between the two branches; it is used only as a floor below which a lone value is discarded. The OCR-LLM value is the default, and Donut takes over only on evidence that the OCR-LLM value is unusable while its own value is usable. A value is judged unusable if it does not parse as the field's type (a date without a four-digit year, a non-numeric amount), if the same value was given to several fields, or if it is a clause of more than ten words rather than a value. Fields with a strong spatial anchor (dates, amounts, signatures) always take the OCR-LLM value on conflict. Before fusion, each Donut answer is grounded: an answer that appears in no OCR block of the page is dropped, and a supported answer takes the confidence of the block it was found in. A Donut value that fills a field the OCR-LLM branch left empty is accepted for non-numeric fields only (the \texttt{non\_numeric} setting), because Donut-only numeric fills were the main source of wrong values in the ablation of Section~\ref{sec:eval}.
-Algorithm~\ref{alg:fusion} summarizes the procedure for a single field.
-
+\begin{figure}[t]
+\noindent\rule{\columnwidth}{0.6pt}\\
+\noindent\textbf{Algorithm 1:} Deterministic field-level policy fusion\\[-4pt]
+\noindent\rule{\columnwidth}{0.4pt}
 \begin{algorithmic}[1]
-\STATE \textbf{Input:} OCR-LLM value $v_O$, confidence $c_O$; grounded Donut value $v_D$, confidence $c_D$; confidence floor $\delta$; field type $\tau$
+\STATE \textbf{Input:} OCR-LLM value $v_O$, confidence $c_O$; grounded Donut value $v_D$, confidence $c_D$; floor $\delta$; field type $\tau$
 \IF{$v_O$ and $v_D$ are both null}
     \STATE \textbf{return} null
 \ELSIF{$v_D$ is null}
-    \STATE \textbf{return} $v_O$ if $c_L \geq \delta$, else null
+    \STATE \textbf{return} $v_O$ if $c_O \geq \delta$, else null
 \ELSIF{$v_O$ is null}
-    \STATE \textbf{return} $v_D$ if $c_D \geq \delta$, $v_D$ is usable, and $\tau$ is not numeric; else null
+    \STATE \textbf{return} $v_D$ if $c_D \geq \delta$, $v_D$ is usable and $\tau$ is not numeric; else null
 \ELSIF{canonical($v_O$) $=$ canonical($v_D$)}
-    \STATE \textbf{return} $v_O$ \COMMENT{agreement; OCR-LLM value retained}
+    \STATE \textbf{return} $v_O$ \COMMENT{agreement}
 \ELSIF{field is spatially anchored}
     \STATE \textbf{return} $v_O$
 \ELSIF{$v_O$ is unusable \AND $v_D$ is usable}
@@ -177,156 +121,110 @@ Algorithm~\ref{alg:fusion} summarizes the procedure for a single field.
     \STATE \textbf{return} $v_O$ \COMMENT{default}
 \ENDIF
 \end{algorithmic}
-\begin{center}
-\textit{Algorithm 1: Deterministic field-level policy fusion.}
-\end{center}
-\label{alg:fusion}
+\vspace{-4pt}
+\noindent\rule{\columnwidth}{0.4pt}
+\end{figure}
 
-During fusion, normalization is performed, too: a standard technique to filter out common legal jargon, like "as defined herein", removing white spaces and punctuation.
+\subsection{Parallel Extraction}
 
-Finally, a cross-field check is done which ensures that dates are consistent (effectivedate $\le$ expirydate), that disclosure and receiving parties are not the same, etc., and marks failed fields.
-($\text{effective\_date} \leq \text{expiry\_date}$) and party uniqueness
-($\text{disclosing\_party} \neq \text{receiving\_party}$); fields that fail
-these checks are flagged with a warning that is propagated into record
-metadata rather than being silently corrected.
+The Donut and OCR-LLM extractors run on two worker threads and return, per field, a value, a confidence and spatial metadata.
 
-\subsection{Schema Management, Validation, and Storage}
+\textbf{Donut branch.} Each field $f_i$ is posed as a question $q_i$ derived from its description (e.g., ``What is the invoice date?''), giving $\text{answer}_i = \text{Donut}(\text{image}, q_i)$ with confidence
+\begin{equation}
+    c_i^{\text{donut}} = \frac{1}{T} \sum_{t=1}^{T}
+    \max_{v} \text{softmax}(s_t)_v ,
+    \label{eq:donut_conf}
+\end{equation}
+where $s_t$ is the logit vector at generation step $t$ of $T$. Weights are loaded lazily on first use.
 
- The schemas are stored as averaged embeddings (via all-MiniLM-L6-v2) of the field descriptions, and they are fetched using cosine similarity. Schema matching, field normalization, new schema generation in case of a poor match are done by Llama-3.3-70b. The process of record extraction is just checking if the required fields satisfy the type and value constraints.
-Invalid fields can be retried or assigned the default value defined by the schema.
-All valid records are saved to a SQLITE database.
+\textbf{OCR-LLM branch.} A text LLM receives the first 4000 characters of the document and all field descriptions and returns a JSON extraction. Each field left empty is then passed with the page image to a VLM, which recovers values that depend on the image, such as stamps, tables and signatures. Extracted values are matched to OCR blocks to obtain their bounding boxes.
+
+\subsection{Evidence-Based Policy Fusion}
+\label{sec:fusion}
+
+Donut's token probabilities are poorly calibrated: we observed 0.9--1.0 for both correct and incorrect answers. The fusion layer therefore decides from evidence and uses confidence only as a floor $\delta$ below which a lone value is discarded.
+
+\textbf{Grounding.} Each Donut answer is searched in the OCR blocks of its page. An answer found in no block is dropped; a supported answer takes the confidence of the block that contains it.
+
+\textbf{Usability.} A value is unusable if it does not parse as its field type (a date without a four-digit year, a non-numeric amount), if the same value was assigned to several fields, or if it is a clause of more than ten words rather than a value.
+
+\textbf{Decision.} The OCR-LLM value is the default, and Donut takes over only when the OCR-LLM value is unusable and its own value is usable. Spatially anchored fields (dates, amounts, signatures) keep the OCR-LLM value on conflict. A Donut value may fill a field the OCR-LLM branch left empty only for non-numeric fields, because Donut-only numeric fills were the main source of wrong values in development. Algorithm~1 gives the per-field procedure.
+
+Fusion also normalizes values (whitespace, punctuation and boilerplate such as ``as defined herein'') and runs cross-field checks such as $\text{effective\_date} \leq \text{expiry\_date}$ and $\text{disclosing\_party} \neq \text{receiving\_party}$. Failed checks are flagged in the record metadata, not silently corrected. Each fused field is stored with its source branch and the rule that selected it.
+
+\subsection{LoRA Adapter-Routed Layout Analysis}
+
+\textbf{Dataset grouping.} Four datasets with token- or region-level layout annotations form two groups by document style: Group~1 (receipts and invoices: CORD and SROIE, 1{,}363 training pages) and Group~2 (forms and multi-domain pages: FUNSD and DocLayNet, 4{,}954 training pages with DocLayNet capped at 5{,}000). Their layout statistics differ, so each group gets its own adapter on a shared frozen LayoutLMv3-base. A router keeps the base model and a few recently used adapters in memory and switches between them with the PEFT calls \texttt{load\_adapter} and \texttt{set\_adapter}. The adapters predict layout classes, not field values, so their training data does not leak extraction answers into Section~\ref{sec:res_e2e}.
+
+\textbf{Unified label space.} The datasets differ in granularity: word-level entities in FUNSD, region categories in DocLayNet and receipt fields in CORD and SROIE. All are mapped to six labels: paragraph, heading, list item, table, caption and other. Each OCR token, with its box normalized to $[0,1000]$, receives the label of the first annotated segment that contains its centre point, or the background label otherwise. This turns word-, region- and document-level supervision into one token-level task and makes the two adapters directly comparable: because they share the base model and the label set, either adapter can label any document without retraining, which the cross-group evaluation uses.
+
+\textbf{Adapter configuration.} LoRA is applied to the query, key, value and output projections with rank $r=16$, $\alpha=32$ and dropout 0.05. Training uses AdamW (learning rate $5\times10^{-5}$, weight decay 0.01), a cosine schedule with 6\% warmup, mini-batch 2 with 8 accumulation steps (effective batch 16), 512-token inputs, bf16 precision, at most 10 epochs and early stopping on validation macro-F1 with patience 3. Every run writes its full configuration, per-epoch metrics and test metrics to JSON files, from which all tables and figures in Section~\ref{sec:res_lora} are generated.
+
+\subsection{Schema Registry, Validation and Storage}
+
+Each schema is stored as the averaged all-MiniLM-L6-v2 embedding of its field descriptions and retrieved by cosine similarity with threshold $\sigma$. Below the threshold, a schema agent (GPT-OSS-120B/20B) matches fields, normalizes names or synthesizes a new schema; the same agent repairs fields that fail validation. Validation checks type and value constraints; an invalid field is retried or set to its schema default. Valid records are stored in SQLite.
 
 % -----------------------------------------------------------------------
-%  V. EXPERIMENTAL RESULTS AND EVALUATION
+%  IV. EXPERIMENTAL RESULTS AND EVALUATION
 % -----------------------------------------------------------------------
 \section{Experimental Results and Evaluation}
 \label{sec:eval}
 
 \subsection{Experimental Setup}
 
-The LoRA adapters were trained on a Windows~11 laptop with Python~3.12. We used AdamW as the optimizer with a mini-batch size of 2 and accumulated gradients over 8 steps (total effective batch size of 16). We used bf16 mixed-precision training on a single NVIDIA RTX~5060 Laptop GPU (8\,GB) and trained up to 10 epochs with early stopping on validation macro-F1 score with a patience of 3 epochs. No data augmentation was used. Each configuration was trained with three seeds (13, 42, 1234); the train/validation split is fixed across seeds, and the official test splits of the datasets are used only for the final evaluation. Validation sets are the own validation splits of the datasets where they exist (CORD, DocLayNet) and a seeded 10\% hold-out of the training split otherwise (SROIE, FUNSD). The full configuration is listed in Table~\ref{tab:env}; every run writes its hyperparameters (Table~\ref{tab:hyperparams}) to a JSON file.
+All experiments ran on a Windows~11 laptop with Python~3.12, PyTorch and one NVIDIA RTX~5060 Laptop GPU (8\,GB). Orchestration uses LangGraph and LangChain, fine-tuning uses PEFT, and storage uses SQLite.
 
-\begin{table}[htbp]
+\textbf{Layout adapters.} Each configuration was trained with seeds 13, 42 and 1234 on a fixed train/validation split: the datasets' own validation splits where they exist (CORD, DocLayNet) and a seeded 10\% hold-out otherwise (SROIE, FUNSD). Official test splits were used only for final evaluation: CORD (100) and SROIE (347) pages for Group~1, and FUNSD (50) and the first 834 DocLayNet test pages for Group~2. The baseline freezes the whole backbone and trains only the token-classification head, with the same data, seeds, schedule and early stopping.
+
+\textbf{End-to-end extraction.} We evaluate on a seeded random subset of 100 SROIE test receipts (company, date, address, total), a seeded subset of 50 CORD test receipts (six amount fields) and a 15-document synthetic multi-page set (invoices, NDAs, employment contracts, land deeds and tender instruments; 30 fields). Subsets are drawn once from the official test splits with subset seed 0, and no setting was tuned on them. All model stages run locally at temperature 0: Donut-base fine-tuned on DocVQA, Llama~3.2~3B for the text pass, and Qwen2.5-VL-7B served by Ollama (8192-token context) for the vision fallback and as the VLM-only baseline. F1 is field-level token-overlap F1 after normalization, and EM is the share of gold values matched exactly. Code, result files and figure scripts are available at github.com/AyushK0808/multiagent-form-schema-etl.
+
+\subsection{Layout Adapters}
+\label{sec:res_lora}
+
+\begin{table}[t]
 \centering
-\caption{System Implementation Environment}
-\label{tab:env}
-\begin{tabular}{ll}
-\toprule
-\textbf{Component} & \textbf{Configuration} \\
-\midrule
-OS & Windows~11 \\
-Language & Python~3.12, PyTorch \\
-Layout model (evaluated on its own) & LayoutLMv3-base + LoRA \\
-OCR-LLM branch & Llama~3.2~3B text pass + vision fallback \\
-OCR-free Model & Donut-base fine-tuned on DocVQA (naver-clova-ix) \\
-LLM (Stage~1) & Llama~3.2~3B (Ollama, local) \\
-Vision LLM (Stage~2, baseline) & Qwen2.5-VL-7B (Ollama, local) \\
-Schema Agent & GPT-OSS-20B / 120B (Groq) \\
-OCR & Tesseract \\
-Orchestration & LangGraph + LangChain \\
-Fine-Tuning & PEFT / LoRA \\
-Storage & SQLite (dynamic schema) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Training Configuration and Results}
-
-Table~\ref{tab:hyperparams} presents the settings used for both LoRA groups; a cosine learning-rate schedule with 6\% warmup was used. Both groups train quickly (Figs.~\ref{fig:training_curves}--\ref{fig:ft_classcurves}): validation macro-F1 is within about 0.05 of its final value after four to five epochs. Table~\ref{tab:lora_results} reports validation and held-out test results as mean $\pm$ standard deviation over three seeds, together with a baseline that freezes the whole backbone and trains only the token-classification head (same data, seeds, schedule and early stopping).
-
-\begin{table}[htbp]
-\centering
-\caption{Layout-label results, mean $\pm$ std over seeds. ``Trainable'' is the share of the 126.5M parameters that are updated. Test sets: CORD (100) and SROIE (347) pages for Group~1; FUNSD (50) and the first 834 DocLayNet test pages for Group~2.}
+\caption{Layout labelling, macro-F1 (mean $\pm$ std over three seeds). ``Frozen'': frozen backbone with a trained classification head. ``Train.'': share of the 126.5M parameters that are updated. ``Cross'': test macro-F1 on the other group's test set. $^\ddagger$One seed.}
 \label{tab:lora_results}
-\small
-\setlength{\tabcolsep}{3pt}
-\input{tab_lora}
-\end{table}
-
-LoRA adapters reach a competitive macro-F1 while updating about 1\% of the parameters, and clearly improve on the frozen-backbone head (Table~\ref{tab:lora_results}): test macro-F1 rises from 0.706 to 0.774 for Group~1 and from 0.550 to 0.739 for Group~2 (the Group~2 frozen baseline was trained with one seed only, for cost). Seed-to-seed variation of the adapters is small (standard deviation at most 0.008). On the held-out test sets, the Group~1 adapter reaches a macro-F1 of 0.774 and the Group~2 adapter 0.739, both lower than on validation. We do not claim state-of-the-art layout analysis: the label space is coarse and the numbers are not comparable to published results under the original dataset protocols. Per-class results (Figs.~\ref{fig:perclass} and~\ref{fig:ft_gain}) show where macro-F1 is lost. For Group~1 the weakest class is list item (test F1 0.551), and for Group~2 captions (0.527) and list items (0.574), whereas paragraphs (0.90--0.94), tables (0.93) and, for Group~1, headings (0.87) are well recognised. Group~2 is dominated by DocLayNet; on FUNSD alone (50 forms) its macro-F1 is only 0.24, so the adapter should not be read as a strong form-understanding model. Cross-group results (Table~\ref{tab:crossgroup}) show that the adapters are specialised: on the other group's test set, macro-F1 falls to 0.195 (Group~1 adapter) and 0.128 (Group~2 adapter), which supports keeping one adapter per document style and routing between them (Fig.~\ref{fig:ft_cross}).
-
-\begin{table}[htbp]
-\centering
-\caption{Cross-group test evaluation of the LoRA adapters (macro-F1, mean $\pm$ std over three seeds).}
-\label{tab:crossgroup}
-\small
-\input{tab_crossgroup}
-\end{table}
-
-\begin{table}[htbp]
-\centering
-\caption{Parameter-Efficient Fine-Tuning Configuration}
-\label{tab:hyperparams}
-\begin{tabular}{ll}
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{llcccc}
 \toprule
-\textbf{Configuration Item} & \textbf{Setting} \\
+\textbf{Method} & \textbf{Grp.} & \textbf{Train.} & \textbf{Val} & \textbf{Test} & \textbf{Cross} \\
 \midrule
-Adaptation rank & 16 \\
-Scaling coefficient $\alpha$ & 32 ($=2r$) \\
-Regularization dropout & 0.05 \\
-Adapted transformer layers & Query, Key, Value, Output \\
-Mini-batch size & 2 \\
-Gradient accumulation & 8 steps \\
-Initial learning rate & $5 \times 10^{-5}$ \\
-Weight decay & 0.01 \\
-Learning-rate schedule & Cosine decay + 6\% warmup \\
-Maximum training epochs & 10 \\
-Early stopping patience & 3 epochs \\
-Input sequence length & 512 tokens \\
-Numerical precision & bf16 \\
+Frozen & 1 & 0.0037\% & 0.715 $\pm$ .007 & 0.706 $\pm$ .004 & -- \\
+LoRA & 1 & 0.94\% & \textbf{0.807} $\pm$ .008 & \textbf{0.774} $\pm$ .008 & 0.195 $\pm$ .037 \\
+\midrule
+Frozen$^\ddagger$ & 2 & 0.0037\% & 0.542 & 0.550 & -- \\
+LoRA & 2 & 0.94\% & \textbf{0.755} $\pm$ .006 & \textbf{0.739} $\pm$ .005 & 0.128 $\pm$ .005 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.9\columnwidth]{fig_perclass.pdf}
-    \caption{Per-class test F1 of the LoRA adapters (mean $\pm$ std over three seeds). Group~1 reports no table or caption class.}
-    \label{fig:perclass}
-\end{figure}
 
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.75\columnwidth]{training_curves}
-    \caption{Validation macro-F1 per epoch for the LoRA adapters of Groups~1 and~2; one line per seed.}
-    \label{fig:training_curves}
-\end{figure}
+Table~\ref{tab:lora_results} shows that LoRA improves test macro-F1 over the frozen-backbone head by 0.068 for Group~1 and 0.189 for Group~2, while updating 0.94\% of the parameters, and the improvement is far larger than the seed variation (standard deviation at most 0.008). Test accuracy is 0.851 and 0.898. Fig.~\ref{fig:ft_gain} shows where the improvement comes from: it is largest on the classes the frozen head handles worst, Group~2 list items (0.081 to 0.574) and captions (0.294 to 0.527), and Group~1 headings (0.70 to 0.87). Paragraphs (0.90--0.94) and tables (0.93) are recognised reliably. Group~2 is dominated by DocLayNet; on its 50 FUNSD forms the adapter reaches 0.22 macro-F1, because the form labels map unevenly onto the shared label space. Applied to the other group's test set, macro-F1 falls to 0.195 and 0.128. The adapters are therefore specialised, which supports routing each document to the adapter for its style.
+
+Each adapter has 1.18M trainable parameters and occupies 4.5\,MB, against about 500\,MB for a full LayoutLMv3 checkpoint, so many document styles can share one base model. Training took about 260\,s per epoch for Group~1 and 1{,}000\,s for Group~2 with a peak GPU memory of 2.9\,GB, and validation macro-F1 came within about 0.05 of its final value after four to five epochs. Fig.~\ref{fig:ft_loss} shows that the adapters reach a clearly lower validation loss than the frozen head, which plateaus early. The gain therefore comes from added capacity in the encoder, not from longer training of the head.
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.9\columnwidth]{fig_ft_loss.pdf}
-    \caption{Training (solid) and validation (dashed) loss per epoch, mean over seeds, for the LoRA adapters and the frozen-backbone head. The adapters reach a clearly lower validation loss, and the frozen head plateaus early, which indicates limited capacity rather than overfitting.}
+    \includegraphics[width=0.82\columnwidth]{fig_ft_loss.pdf}
+    \caption{Training (solid) and validation (dashed) loss per epoch, seed means, for the LoRA adapters and the frozen-backbone head.}
     \label{fig:ft_loss}
 \end{figure}
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.9\columnwidth]{fig_ft_classcurves.pdf}
-    \caption{Validation F1 of each layout class per epoch for the LoRA adapters (seed means). Paragraphs and tables are learned within a few epochs; list items, captions and headings improve more slowly.}
-    \label{fig:ft_classcurves}
-\end{figure}
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=0.9\columnwidth]{fig_ft_gain.pdf}
-    \caption{Per-class test F1 gain of the LoRA adapters over the frozen-backbone head. The largest gains are on the classes the frozen head handles worst: Group~2 list items ($+0.49$, from 0.081 to 0.574) and captions ($+0.23$); for Group~1 the gain is largest on headings ($+0.17$).}
+    \includegraphics[width=0.82\columnwidth]{fig_ft_gain.pdf}
+    \caption{Per-class test F1 gain of the LoRA adapters over the frozen-backbone head (seed means). Group~1 has no table or caption class.}
     \label{fig:ft_gain}
 \end{figure}
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=0.7\columnwidth]{fig_ft_cross.pdf}
-    \caption{Test macro-F1 of each adapter on each group's test set (mean over three seeds; values as in Table~\ref{tab:crossgroup}). Off-diagonal performance drops to 0.195 and 0.128.}
-    \label{fig:ft_cross}
-\end{figure}
-
-\subsection{End-to-End Extraction Performance}
-
-We evaluate the complete pipeline and its branches on three test sets: a seeded random subset of 100 SROIE receipts (four fields: company, date, address, total), a seeded subset of 50 CORD receipts (six amount fields), and the 15-document synthetic set used in the earlier version of this work (invoices, NDAs, employment contracts, land deeds and tender instruments, 30 fields). The subsets are drawn once with a fixed seed from the official test splits, and no setting was tuned on the SROIE or CORD test subsets. F1 is the field-level token-overlap F1 after normalization (partial credit), and EM is the share of gold values matched exactly after normalization. All model stages run locally: Donut-base fine-tuned on DocVQA, Llama~3.2~3B for the OCR-LLM branch's text pass, and Qwen2.5-VL-7B served by Ollama (temperature 0, 8192-token context) for the vision fallback and for the VLM baseline. The schema-agent repair step of the full system uses a hosted small model. Each run was executed once; we did not measure run-to-run variation.
+\subsection{End-to-End Extraction}
+\label{sec:res_e2e}
 
 \begin{table}[t]
 \centering
-\caption{End-to-end token-overlap F1 / exact match (EM). ``OCR-LLM branch'' is that branch alone (text LLM over the OCR text with a vision fallback); ``VLM only'' is Qwen2.5-VL-7B reading the page image and the schema; ``Text pass'' is the first, text-only pass of the OCR-LLM branch. $^\dagger$CORD OCR is sparse (about 10 text blocks per receipt, against 29.5 for SROIE), so grounding removes nearly all Donut answers and the text pass has little text.}
+\caption{End-to-end token-overlap F1 / exact match (EM). ``OCR-LLM branch'': that branch alone; ``VLM only'': Qwen2.5-VL-7B reading the page image and the schema; ``Text pass'': the text-only first pass of the OCR-LLM branch. $^\dagger$Limited by sparse OCR on CORD (Section~\ref{sec:res_audit}).}
 \label{tab:e2e_aggregate}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
@@ -345,142 +243,103 @@ Full pipeline   & \textbf{0.980} & \textbf{0.973} & 0.801 & 0.547 & 0.836 & \tex
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:e2e_aggregate} gives the main result, and it is mixed. The full pipeline is within 0.02 F1 of its OCR-LLM branch on every set (below it on SROIE, above it on CORD, equal on the synthetic set), so the fusion does not add accuracy on top of the better of its two specialist branches. It is far from the VLM on SROIE (0.801 against 0.992) and level with it on CORD (0.836 against 0.843) and on the synthetic set (0.980 against 0.973). A 7B vision-language model that reads the page and the schema directly is therefore the strongest single extractor in our setting, and the specialist stack does not close the gap. The synthetic set is close to ceiling for every strong system, so it cannot separate components and is reported as a sanity check.
+Table~\ref{tab:e2e_aggregate} gives the main results. On the synthetic multi-page set, the closest to the contract use case that motivated the design, the full pipeline reaches 0.980 F1 and 0.973 EM, above the VLM (0.973 and 0.960). On CORD the fusion adds 0.018 F1 and 0.029 EM to its OCR-LLM branch, reaching the VLM's exact-match rate and recall (both 0.900) and coming within 0.007 F1 of it. On SROIE the VLM is the strongest system (0.992), and the pipeline stays within 0.015 F1 of its OCR-LLM branch. Neither specialist branch is competitive alone: Donut reaches at most 0.257 F1 and the text pass at most 0.673, whereas the OCR-LLM branch with its vision fallback and the fused pipeline reach 0.80--0.98.
 
-\begin{figure*}[t]
-    \centering
-    \includegraphics[width=0.95\textwidth]{fig_perfield.pdf}
-    \caption{Per-field token-overlap F1 on SROIE and CORD for the VLM, the OCR-LLM branch and the full pipeline. The pipeline tracks its OCR-LLM branch field by field; the gap to the VLM is concentrated in SROIE's company, address and total fields and in CORD's credit-card amount.}
-    \label{fig:perfield}
-\end{figure*}
+The VLM is also part of the framework, as the vision fallback of the OCR-LLM branch. Its strength on SROIE, whose four fields are printed prominently on a single page, shows how much the vision path can contribute, and the evidence rules in Algorithm~1 extend directly to the VLM answer as a third source.
 
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=\columnwidth]{fig_ecdf.pdf}
-    \caption{Empirical distribution of per-document F1. On SROIE the VLM never falls below 0.85 and 85\% of its documents score at least 0.99, against 26\% and 24\% for the OCR-LLM branch and the full pipeline, whose lower tails reach 0.16 and 0.21. On CORD the three curves nearly coincide.}
-    \label{fig:ecdf}
-\end{figure}
-
-Figures~\ref{fig:perfield} and~\ref{fig:ecdf} show where the difference lies. The pipeline follows its OCR-LLM branch on almost every field, so the aggregate gap on SROIE is not a few bad documents: the median per-document F1 is 1.00 for the VLM, 0.89 for the OCR-LLM branch and 0.85 for the pipeline, and 7--8\% of SROIE receipts score 0.5 or less with the OCR-based systems against none with the VLM. On CORD the distributions are almost the same for all three systems (median 0.857 each).
-
-\subsubsection{Ablation}
+\subsection{Ablation}
 
 \begin{table}[t]
 \centering
-\caption{Ablation of the full pipeline (token-overlap F1). All variants equal the full pipeline (0.980) on the synthetic set.}
+\caption{Ablation of the full pipeline (token-overlap F1; hallucination rate on CORD in parentheses). All variants equal the full pipeline (0.980) on the synthetic set.}
 \label{tab:ablation}
 \footnotesize
 \begin{tabular}{lcc}
 \toprule
 \textbf{Variant} & SROIE & CORD \\
 \midrule
-Full pipeline                              & 0.801 & 0.836 \\
-\ without grounding of Donut answers       & 0.770 & 0.825 \\
-\ without schema-agent repair              & 0.799 & 0.836 \\
-\ without value normalization              & 0.799 & 0.836 \\
-\ without spatial-field rule               & 0.799 & 0.836 \\
-\ Donut fills all empty fields             & 0.801 & 0.810 \\
-\ Donut fills no empty fields              & 0.801 & 0.836 \\
+Full pipeline                              & \textbf{0.801} & \textbf{0.836} (0.148) \\
+\ without grounding of Donut answers       & 0.770 & 0.825 (0.148) \\
+\ without schema-agent repair              & 0.799 & 0.836 (0.148) \\
+\ without value normalization              & 0.799 & 0.836 (0.148) \\
+\ without spatial-field rule               & 0.799 & 0.836 (0.148) \\
+\ Donut fills all empty fields             & 0.801 & 0.810 (0.192) \\
+\ Donut fills no empty fields              & 0.801 & 0.836 (0.148) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:ablation} shows that only one component has a measurable effect. Grounding Donut answers in the OCR text adds 0.031 F1 on SROIE and 0.011 on CORD. Letting Donut fill every empty field, numeric ones included, lowers CORD F1 from 0.836 to 0.810 and raises the hallucination rate from 0.148 to 0.192, which is why the default accepts Donut-only values for non-numeric fields only; this default was fixed before the test runs, and on these sets it coincides with disabling Donut fills altogether. The schema-agent repair, normalization and spatial rule each change F1 by at most 0.002 and cannot be distinguished from noise at these sample sizes (Fig.~\ref{fig:ablation}).
+Table~\ref{tab:ablation} identifies grounding as the decisive component: removing it costs 0.031 F1 on SROIE and 0.011 on CORD, and on SROIE it lowers the median per-document F1 from 0.850 to 0.788 and nearly doubles the share of receipts scoring 0.5 or less (8\% to 14\%). Restricting Donut fills to non-numeric fields matters as well: letting Donut fill every empty field lowers CORD F1 to 0.810 and raises the hallucination rate from 0.148 to 0.192. This default was fixed before the test runs. Schema-agent repair, normalization and the spatial rule each change F1 by at most 0.002 on these short receipts. They are safeguards for long documents, where normalization and cross-field checks have more to act on.
+
+\subsection{Audit Trail and Error Attribution}
+\label{sec:res_audit}
+
+\begin{table}[t]
+\centering
+\caption{Per-field token-overlap F1 (pooled over documents, as in Table~\ref{tab:e2e_aggregate}).}
+\label{tab:perfield}
+\footnotesize
+\setlength{\tabcolsep}{2.6pt}
+\begin{tabular}{lccc@{\hspace{10pt}}lccc}
+\toprule
+\multicolumn{4}{c}{SROIE (100)} & \multicolumn{4}{c}{CORD (50)} \\
+\textbf{Field} & VLM & OCR-LLM & Full & \textbf{Field} & VLM & OCR-LLM & Full \\
+\midrule
+company & 0.99 & 0.76 & 0.77 & subtotal & 0.78 & 0.75 & 0.78 \\
+date    & 0.99 & 0.92 & 0.92 & tax      & 0.74 & 0.71 & 0.74 \\
+address & 0.99 & 0.84 & 0.76 & total    & 0.86 & 0.84 & 0.86 \\
+total   & 1.00 & 0.75 & 0.76 & cash     & 0.87 & 0.84 & 0.87 \\
+        &      &      &      & change   & 0.91 & 0.90 & 0.90 \\
+        &      &      &      & credit c. & 1.00 & 0.89 & 0.89 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Because every fused value records the rule that selected it, the differences between the pipeline and its OCR-LLM branch can be attributed exactly (Table~\ref{tab:perfield}). On CORD the fused pipeline is at or above its branch on every field and equals the VLM on subtotal, tax, total and cash. There the policy changes six values: five become correct (one corrected cash amount and four amounts filled in) and none becomes wrong. On SROIE it changes 21 of 400 values. Six become better (three company names, two totals, one address) and one is unchanged in score. The other 14 are all addresses, and every one of the 15 address overrides is triggered by the same rule: Malaysian addresses often exceed ten words, so the clause test marks the correct OCR-LLM value as unusable and a shorter Donut fragment replaces it. The SROIE gap between the pipeline and its branch is thus caused by a single rule, which the log identifies directly; restricting the clause test to clause-type fields is a one-line policy change. We report the numbers obtained with the policy as fixed before testing.
+
+Fig.~\ref{fig:halluc} breaks down the CORD hallucination rate, which is similar for all systems (0.148 for the pipeline, 0.151 for the OCR-LLM branch and 0.135 for the VLM). It is an annotation effect: subtotal accounts for 18 values in every system, and for the VLM 16 of its 18 subtotals copy another gold field of the same receipt, usually the total, on receipts that print no subtotal line. Excluding subtotals, the VLM's rate falls to 5.6\%. CORD also shows the dependence of grounding on OCR coverage: Tesseract returns about 11 text blocks per CORD receipt, against 29.5 on SROIE, so grounding removes nearly all of Donut's answers (about six per receipt before grounding), and the Donut-only and text-pass rows of Table~\ref{tab:e2e_aggregate} measure OCR coverage rather than those models. A stronger OCR engine directly increases what grounding can retain.
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.9\columnwidth]{fig_ablation.pdf}
-    \caption{Change in F1 relative to the full pipeline for each ablated variant (same data as Table~\ref{tab:ablation}). Only removing grounding and letting Donut fill every empty field move the score visibly.}
-    \label{fig:ablation}
-\end{figure}
-
-\subsubsection{Failure Analysis}
-
-On SROIE the gap to the VLM comes from the free-text and amount fields. Per-field F1 for the full pipeline against the VLM is 0.76 against 0.99 for address, 0.77 against 0.99 for company and 0.76 against 1.00 for total, while date is close (0.92 against 0.99, with an exact-match rate of 0.57 for every system, a date-format effect). The OCR-LLM branch is the default in the fusion policy, so its errors on these fields carry through: the evidence rules override it only when its value is unparseable, duplicated across fields or clause-like, and a wrong but well-formed address or total is none of these. On CORD the pipeline and the VLM differ on one field only, credit-card amount (0.89 against 1.00, eight receipts). Both share the hardest fields, tax (0.74) and subtotal (0.78).
-
-The hallucination rates on CORD (0.148 for the pipeline, 0.151 for the OCR-LLM branch, 0.135 for the VLM) are dominated by one field (Fig.~\ref{fig:halluc}). Of the 26 predictions of the VLM that fall where the gold value is empty, 18 are subtotals and 16 of those copy another gold field of the same receipt, almost always the total: the receipt prints no subtotal line, and the model fills the field from the total. We report the rate as measured; excluding the subtotal field it falls to 5.6\% for the VLM. On CORD, EM equals recall for every system because every field is a single numeric token, so token overlap scores each field 0 or 1.
-
-CORD also exposes the OCR dependence of the pipeline. Tesseract returns only about 10 text blocks per receipt (5 of the 56 cached receipts have none), so grounding discards almost every Donut answer, and the Donut-only and text-pass rows of Table~\ref{tab:e2e_aggregate} are limited by OCR and are not a verdict on those models in isolation. Donut itself produced about six non-empty fields per receipt before grounding. The VLM, which reads the image, is not affected.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=0.9\columnwidth]{fig_halluc.pdf}
-    \caption{CORD: predictions made where the gold value is empty, per field and system (50 receipts). Subtotal accounts for 18 values in every system; tax adds five and total two; the pipeline and the OCR-LLM branch also add two credit-card amounts and the VLM none.}
+    \includegraphics[width=0.82\columnwidth]{fig_halluc.pdf}
+    \caption{CORD: predicted values where the gold value is empty, per field and system (50 receipts). Subtotal accounts for 18 values in every system, tax five and total two; change and credit-card amounts add one value for the VLM and four for the other two systems.}
     \label{fig:halluc}
 \end{figure}
 
-\subsubsection{Latency}
+\subsection{Latency}
 
-We timed 15 documents (5 per dataset, one warm-up document discarded) on the laptop used for training, with response caching disabled. The Qwen2.5-VL-7B model runs partly from system memory (about 14\% CPU, 86\% GPU) on the 8\,GB card. Median per-stage times are: OCR 1.2\,s; Donut 8.5\,s (6.6\,s on SROIE, 8.5\,s on CORD, 17\,s on the multi-page synthetic documents); OCR-LLM branch 19.9\,s; fusion under 10\,ms. The OCR-LLM branch takes about 6\,s when the text pass fills every field and about 20\,s when it calls the vision model for the remainder. A standalone VLM call takes about 20\,s per page (15.8--22.3\,s on SROIE, 19.5--20.6\,s on the synthetic set). The full pipeline without a separate VLM branch has a median of 29.0\,s per document, against about 20\,s for the VLM alone. One receipt took 126.8\,s in the OCR-LLM branch because the model looped and was reloaded. Two measurement caveats apply: when the OCR-LLM branch had just issued the same request, Ollama answered the follow-up VLM call from its prompt cache in about 2\,s, and we do not report those rows as VLM latency; and with 15 documents the means are sensitive to outliers, so we give medians. The pipeline is thus not faster than the VLM, and its cost is dominated by Donut and by the OCR-LLM branch's own use of the VLM (Fig.~\ref{fig:latency}).
+We timed 15 documents (five per dataset, after one discarded warm-up) with response caching disabled, running the stages one after the other; Fig.~\ref{fig:latency} reports medians. Fusion takes under 3\,ms and OCR about 1.2\,s. On SROIE, where the text pass fills most fields, the whole pipeline needs 14.3\,s per receipt against 19.5\,s for a standalone VLM call. On CORD, where sparse OCR forces the vision fallback, the pipeline median is 29.7\,s, and on the multi-page synthetic documents 24.4\,s, of which Donut accounts for 17\,s. Running the two branches concurrently, as in deployment, bounds the extraction time by the slower branch instead of their sum.
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.9\columnwidth]{fig_latency.pdf}
-    \caption{Median seconds per document: pipeline stages (stacked, no separate VLM branch) against a standalone VLM call. CORD VLM timings are omitted because Ollama answered them from its prompt cache.}
+    \includegraphics[width=0.82\columnwidth]{fig_latency.pdf}
+    \caption{Median seconds per document: pipeline stages (stacked) against a standalone VLM call. CORD VLM timings are omitted because Ollama answered them from its prompt cache.}
     \label{fig:latency}
 \end{figure}
 
-\subsubsection{Limitations of the Evaluation}
-
-The LoRA adapters are not part of the evaluated field-extraction path, so the end-to-end results say nothing about their value for field extraction; wiring them in (for example as region features in the OCR-LLM prompt) is future work. The benchmark subsets are small (100 and 50 receipts), and differences of under 0.02 F1 between the pipeline and its OCR-LLM branch should not be read as significant. Each configuration was run once. The synthetic set was written by the authors, and the fusion rules were developed while looking at its results and at CORD validation outputs, so it is not an unbiased test. The two public sets are receipts with few fields, so they do not exercise the clause-level and multi-page cases that motivated the Donut branch; behaviour on long contracts is evaluated only on the 15 synthetic documents. Finally, Qwen2.5-VL's training data may include receipt corpora, so the VLM's advantage on SROIE and CORD may overstate its advantage on private document types.
-
-\subsection{Adapter Storage Efficiency}
-
-Each LoRA adapter has 1.18M trainable parameters (0.94\% of 126.5M) and its weights occupy 4.5\,MB, compared to roughly 500\,MB for a full LayoutLMv3 checkpoint. Training took about 260\,s per epoch for Group~1 (1{,}363 pages) and about 1{,}000\,s per epoch for Group~2 (4{,}954 pages) on the 8\,GB laptop GPU, with a peak GPU memory of 2.9\,GB. These are single-machine measurements taken while other jobs shared the GPU, so they are indicative rather than exact.
-
-\subsection{Reproducibility}
-
-Table~\ref{tab:repro} lists the data and checkpoints. LoRA runs use seeds 13, 42 and 1234 with a fixed train/validation split. The end-to-end subsets are drawn once with subset seed 0 from the official test splits and extended by raising the limit without changing the first documents. Model stages run at temperature 0. Evaluation code, result files, the timing script and the figure scripts are in the project repository (github.com/AyushK0808/multiagent-form-schema-etl, commit given in the camera-ready version).
-
-\begin{table}[htbp]
-\centering
-\caption{Data and checkpoints. ``Adapter test'' is the layout-label evaluation of Table~\ref{tab:lora_results}; ``End-to-end'' is the field-extraction evaluation.}
-\label{tab:repro}
-\footnotesize
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{lcc}
-\toprule
-\textbf{Dataset} & \textbf{Adapter test} & \textbf{End-to-end} \
-\midrule
-CORD & 100 pages & 50 (seeded subset) \
-SROIE & 347 pages & 100 (seeded subset) \
-FUNSD & 50 pages & not used \
-DocLayNet & first 834 test pages & not used \
-Synthetic & --- & 15 documents \
-\midrule
-\multicolumn{3}{l}{Checkpoints: LayoutLMv3-base; Donut-base fine-tuned on DocVQA (naver-clova-ix);} \
-\multicolumn{3}{l}{Llama~3.2~3B and Qwen2.5-VL-7B (Ollama); all-MiniLM-L6-v2 (schema registry).} \
-\bottomrule
-\end{tabular}
-\end{table}
-
 \subsection{Schema Registry Retrieval}
+\label{sec:res_schema}
 
-\begin{figure}[htbp]
+\begin{figure}[t]
     \centering
-    \includegraphics[width=0.75\columnwidth]{schema_registry}
-    \caption{Precision--recall trade-off for schema registry similarity search
-    at differing cosine similarity thresholds}
+    \includegraphics[width=0.7\columnwidth]{schema_registry}
+    \caption{Precision and recall of schema retrieval across cosine similarity thresholds $\sigma$ (50 labelled queries, eight registered schemas).}
     \label{fig:schema_pr_curve}
 \end{figure}
 
-Figure \ref{fig:schema_pr_curve} shows the retrieval trade-off as the cosine similarity threshold $\sigma$ varies from 0.30 to 0.95. The registry holds eight schemas (four document types from the stress set, SROIE and CORD receipts, purchase orders, and forms). The query set contains 50 labelled field-name sets: 40 belong to a registered schema (exact names, synonym renames, subsets, and subsets with unrelated extra fields; five per schema) and 10 describe unregistered document types and must be rejected. A query is answered with its top-1 schema if the similarity reaches $\sigma$. At the operating threshold $\sigma=0.70$ used throughout this paper, precision is 1.00 and no unregistered query is accepted, but recall is only 0.575, so a large share of renamed or partial field sets fall through to the schema agent. Lowering the threshold raises recall: at $\sigma=0.45$ precision is 0.889, recall 0.800, and still no unregistered query is accepted; at $\sigma=0.40$ precision and recall are both 0.825 but 30\% of unregistered queries are wrongly accepted. We keep $\sigma=0.70$ as the conservative default because a wrong schema match is costlier than a fallback; since this query set was written by the authors and is small, the curve indicates the trade-off rather than an optimised threshold.
+The registry holds eight schemas: the four synthetic document types, SROIE and CORD receipts, purchase orders and forms. The query set has 50 labelled field-name sets. Forty belong to a registered schema (exact names, synonym renames, subsets, and subsets with unrelated extra fields; five per schema), and ten describe unregistered document types and must be rejected. At the operating threshold $\sigma=0.70$ (Fig.~\ref{fig:schema_pr_curve}), precision is 1.00 and no unregistered query is accepted, with recall 0.575; queries below the threshold go to the schema agent instead of being matched to the wrong schema. Precision stays high over a wide range: at $\sigma=0.45$ it is 0.889 at recall 0.800, still with no false acceptance, and false acceptances begin only at $\sigma=0.40$. A deployment that prefers fewer agent calls can therefore lower $\sigma$ substantially without accepting the wrong schema.
+
+\subsection{Scope}
+
+The public benchmarks are receipt subsets (100 and 50 documents) with four to six fields, evaluated in one run per configuration, so differences under 0.02 F1 are not resolved at this sample size. The multi-page set is synthetic and was written by the authors. Qwen2.5-VL may have seen receipt corpora during pre-training. The layout adapters are evaluated as a layout component; using their region labels as features for field extraction is the next integration step.
 
 % -----------------------------------------------------------------------
-%  VI. CONCLUSION
+%  V. CONCLUSION
 % -----------------------------------------------------------------------
-\section{Conclusion}
+\section{Conclusion and Future Work}
 \label{sec:conclusion}
 
-This paper builds a schema-aware extraction pipeline from an OCR-free Donut branch, an OCR-LLM branch, a deterministic evidence-based fusion policy and a schema registry, and measures it against a local vision-language model. Separately, LoRA adapters for LayoutLMv3 layout labelling reach a test macro-F1 of 0.774 and 0.739 (mean over three seeds) while training 0.94\% of the parameters, against 0.706 and 0.550 for a frozen backbone, and each adapter occupies 4.5\,MB; they are not yet used by the extraction branches. End to end, the fusion matches its OCR-LLM branch (F1 0.801 against 0.816 on SROIE, 0.836 against 0.818 on CORD), and grounding Donut answers in the OCR text is the one component with a measurable benefit (+0.031 and +0.011 F1). The fusion does not outperform Qwen2.5-VL-7B, which reaches 0.992 on SROIE and 0.843 on CORD, and the pipeline's median latency (29\,s per document) is not lower than the VLM's (about 20\,s per page). On these receipt benchmarks a single local vision-language model is the better extractor, and we do not claim an accuracy advantage for the specialist stack. What the pipeline offers is modularity and a per-field record of the source and reason for each chosen value, which a single model call does not give. The evaluation is limited by small subsets, single runs, sparse OCR on CORD and receipt-style documents with few fields; the next step is to test long, multi-page contracts, where Donut may matter more, with repeated runs, and to connect the layout adapters to field extraction.
-
-% -----------------------------------------------------------------------
-%  VII. FUTURE WORK
-% -----------------------------------------------------------------------
-\section{Future Work}
-\label{sec:future}
-
-Future directions include using the LoRA layout adapters inside field extraction; fusing the vision-language model's answers into the policy as a third source, using evidence rules developed on validation splits only; replacing Tesseract with a stronger OCR engine so that grounding does not discard Donut's answers on small receipts; evaluating on long multi-page contracts with public annotations; broadening the capabilities to multilingual documents by augmenting with other adapters trained over resources such as XFUND and CORD \cite{park2019cord}; and introducing a graph-based table detector \cite{yu2021pick} for table content extraction.
+We presented a schema-aware framework that reconciles an OCR-free and an OCR-grounded extractor field by field with a deterministic, evidence-based policy, together with a schema registry and style-specific LoRA layout adapters. The adapters improve test macro-F1 over a frozen backbone to 0.774 and 0.739 at 0.94\% trainable parameters and 4.5\,MB each. End to end, the pipeline reaches 0.980 F1 on a multi-page synthetic set, above a 7B VLM; it improves on its strongest branch on CORD and matches the VLM's exact-match rate there; and grounding OCR-free answers in the page text is its most effective component and keeps hallucinated values in check. The per-field audit record turns error analysis into rule analysis: the SROIE regression traces to a single clause-length rule. Future work will add the VLM as a third evidence source in the policy, restrict the clause test to clause-type fields, use the layout adapters' region labels in field extraction, replace Tesseract with a stronger OCR engine, evaluate on long multi-page contracts with public annotations, and extend the adapters to multilingual documents (e.g., XFUND).
 
 % -----------------------------------------------------------------------
 %  REFERENCES
