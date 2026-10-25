@@ -10,7 +10,7 @@ ExtractionBundle for the downstream ReflexivePolicyLayer.
 LoRA adapter routing
 --------------------
 Both _run_layoutlm and ParallelExtractor accept an `adapter_group` parameter
-("group_1" | "group_2" | "group_3").  The group is resolved upstream by the
+("group_1" | "group_2").  The group is resolved upstream by the
 orchestrator and passed down here so the correct LoRA adapter is active
 when FormFiller calls the LayoutLMv3 token classifier.
 """
@@ -39,6 +39,7 @@ class ExtractorResult:
     spatial_meta:  Dict[str, Any]
     elapsed_s:     float = 0.0
     error:         Optional[str] = None
+    extra:         Dict[str, Any] = field(default_factory=dict)   # e.g. text-only first-pass output
 
     @property
     def field_coverage(self) -> float:
@@ -81,22 +82,52 @@ class ExtractionBundle:
 # Donut runner  (unchanged — Donut is OCR-free, no adapter routing needed)
 # ---------------------------------------------------------------------------
 
+_DONUT_EXTRACTORS: Dict[str, Any] = {}
+
+
+def _get_donut(model_id: Optional[str]):
+    """One DonutExtractor per checkpoint, so weights are loaded once per process."""
+    from extraction.donut_extractor import DonutExtractor
+    key = model_id or "default"
+    if key not in _DONUT_EXTRACTORS:
+        _DONUT_EXTRACTORS[key] = DonutExtractor(model_id=model_id) if model_id else DonutExtractor()
+    return _DONUT_EXTRACTORS[key]
+
+
+def _as_page_list(page_image, page_images) -> list:
+    if page_images:
+        return list(page_images)
+    return [page_image] if page_image is not None else []
+
+
 def _run_donut(
     page_image: Image.Image,
     schema: Dict,
     model_id: Optional[str] = None,
+    page_images: Optional[list] = None,
 ) -> ExtractorResult:
+    """Run Donut on every page; per field keep the most confident non-null answer."""
     t0 = time.perf_counter()
     try:
-        from extraction.donut_extractor import DonutExtractor
-        kwargs = {"model_id": model_id} if model_id else {}
-        extractor = DonutExtractor(**kwargs)
-        fields, confidences = extractor.extract(page_image, schema)
+        extractor = _get_donut(model_id)
+        fields: Dict[str, Any] = {}
+        confidences: Dict[str, float] = {}
+        field_page: Dict[str, int] = {}
+        for page_idx, img in enumerate(_as_page_list(page_image, page_images)):
+            p_fields, p_conf = extractor.extract(img, schema)
+            for name, value in p_fields.items():
+                better = value is not None and (
+                    fields.get(name) is None or p_conf.get(name, 0.0) > confidences.get(name, 0.0)
+                )
+                if name not in fields or better:
+                    fields[name] = value
+                    confidences[name] = p_conf.get(name, 0.0)
+                    field_page[name] = page_idx
         return ExtractorResult(
             source="donut",
             fields=fields,
             confidences=confidences,
-            spatial_meta={k: {"bbox": None, "page": 0} for k in fields},
+            spatial_meta={k: {"bbox": None, "page": field_page.get(k, 0)} for k in fields},
             elapsed_s=time.perf_counter() - t0,
         )
     except Exception as exc:
@@ -112,6 +143,28 @@ def _run_donut(
         )
 
 
+_UNGROUNDED_CONFIDENCE = 0.6
+
+
+def _digits(text: str) -> str:
+    return "".join(ch for ch in text if ch.isdigit())
+
+
+def _grounding_block(value: Any, blocks: list) -> Optional[Dict]:
+    """First block whose text contains ``value`` (case-insensitive; digits-only for numbers)."""
+    val = str(value or "").strip().lower()
+    if not val:
+        return None
+    val_digits = _digits(val) if len(_digits(val)) >= 3 else ""
+    for b in blocks:
+        txt = str(b.get("text", "")).lower()
+        if val in txt:
+            return b
+        if val_digits and val_digits in _digits(txt):
+            return b
+    return None
+
+
 # ---------------------------------------------------------------------------
 # LayoutLM / FormFiller runner — LoRA adapter group aware
 # ---------------------------------------------------------------------------
@@ -123,6 +176,7 @@ def _run_layoutlm(
     clause_graph: Dict,
     full_text: str,
     adapter_group: str = "group_2",
+    page_images: Optional[list] = None,
 ) -> ExtractorResult:
     """
     Run FormFiller with the LoRA adapter group that matches this document type.
@@ -140,23 +194,27 @@ def _run_layoutlm(
             schema,
             full_text=full_text,
             page_image=page_image,
+            page_images=page_images,
         )
         fields = form.fields
 
+        # Confidence comes from evidence in the document text: a value found in a
+        # block takes that block's confidence (1.0 for native text, the mean
+        # Tesseract word confidence for OCR). Values found in no block, such as
+        # those read from the image by the vision LLM, get the default.
         conf_scores: Dict[str, float] = {}
+        spatial: Dict[str, Any] = {}
         for fname in fields:
-            raw_conf = form.metadata.get("confidence_scores", {}).get(fname, 0.6)
-            conf_scores[fname] = 0.0 if fields[fname] == "NaN" else float(raw_conf)
             if fields[fname] == "NaN":
                 fields[fname] = None
-
-        spatial: Dict[str, Any] = {}
-        for b in blocks:
-            for fname in fields:
-                txt = str(b.get("text", ""))
-                val = str(fields.get(fname) or "")
-                if val and val in txt and fname not in spatial:
-                    spatial[fname] = {"bbox": b.get("bbox"), "page": b.get("page", 0)}
+                conf_scores[fname] = 0.0
+                continue
+            block = _grounding_block(fields[fname], blocks)
+            if block is not None:
+                conf_scores[fname] = float(block.get("confidence", 1.0))
+                spatial[fname] = {"bbox": block.get("bbox"), "page": block.get("page", 0)}
+            else:
+                conf_scores[fname] = _UNGROUNDED_CONFIDENCE
 
         return ExtractorResult(
             source="layoutlm",
@@ -164,6 +222,7 @@ def _run_layoutlm(
             confidences=conf_scores,
             spatial_meta=spatial,
             elapsed_s=time.perf_counter() - t0,
+            extra={"text_pass": filler.last_passes.get("text")},
         )
     except Exception as exc:
         logger.error("[Parallel] LayoutLM runner failed: %s", exc)
@@ -191,7 +250,7 @@ class ParallelExtractor:
     donut_model_id : override the default Donut checkpoint
     max_workers    : thread pool size (default 2)
     adapter_group  : LoRA adapter group to activate for LayoutLM
-                     ("group_1" | "group_2" | "group_3")
+                     ("group_1" | "group_2")
     """
 
     def __init__(
@@ -211,18 +270,20 @@ class ParallelExtractor:
         schema: Dict,
         clause_graph: Dict,
         full_text: str = "",
+        page_images: Optional[list] = None,
     ) -> ExtractionBundle:
         bundle = ExtractionBundle()
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures: Dict[str, Future] = {
                 "donut": pool.submit(
-                    _run_donut, page_image, schema, self.donut_model_id
+                    _run_donut, page_image, schema, self.donut_model_id, page_images
                 ),
                 "layoutlm": pool.submit(
                     _run_layoutlm,
                     blocks, page_image, schema, clause_graph, full_text,
                     self.adapter_group,      # ← adapter group forwarded
+                    page_images,
                 ),
             }
 

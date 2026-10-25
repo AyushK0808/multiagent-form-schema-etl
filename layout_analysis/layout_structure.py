@@ -260,7 +260,7 @@ class AdapterLayoutAnalyzer:
 
     Parameters
     ----------
-    group_name  : one of "group_1", "group_2", "group_3".
+    group_name  : one of "group_1", "group_2".
                   If None, defaults to "group_2" (structural classification),
                   which is the most general-purpose group.
     adapter_root: override for the adapter root directory.
@@ -303,7 +303,7 @@ class AdapterLayoutAnalyzer:
 # ---------------------------------------------------------------------------
 
 def _adapter_root_has_any_group(adapter_root: Path) -> bool:
-    for grp in ("group_1", "group_2", "group_3"):
+    for grp in ("group_1", "group_2"):
         if (adapter_root / grp / "layoutlmv3").exists():
             return True
     return False
@@ -390,7 +390,7 @@ class LayoutAnalyzer:
         ----------
         blocks     : ingested DocumentBlock dicts
         page_image : PIL Image of the document page
-        group_name : LoRA adapter group to use ("group_1"|"group_2"|"group_3").
+        group_name : LoRA adapter group to use ("group_1"|"group_2").
                      If None and adapters are available, defaults to "group_2".
                      Ignored when using the legacy or heuristic backend.
         """

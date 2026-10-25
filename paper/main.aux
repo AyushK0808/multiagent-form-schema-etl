@@ -1,0 +1,125 @@
+\relax 
+\citation{layoutlm}
+\citation{layoutlmv2}
+\citation{layoutlmv3}
+\citation{kim2022donut}
+\citation{chiticariu2013rule}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {II}Related Work}{1}{}\protected@file@percent }
+\newlabel{sec:related}{{II}{1}{}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-A}}Rule-Based and Template Extraction}{1}{}\protected@file@percent }
+\citation{layoutlm}
+\citation{layoutlmv2}
+\citation{layoutlmv3}
+\citation{hong2022bros}
+\citation{wang2022lilt}
+\citation{luo2023geolayoutlm}
+\citation{lee2022formnet}
+\citation{jaume2019funsd}
+\citation{park2019cord}
+\citation{huang2019sroie}
+\citation{pfitzmann2022doclaynet}
+\citation{smith2007tesseract}
+\citation{kim2022donut}
+\citation{lee2023pix2struct}
+\citation{gptner2025}
+\citation{cuad2021}
+\citation{stanislawek2021kleister}
+\citation{react2023}
+\citation{bai2025qwen25vl}
+\citation{fiscus1997rover}
+\citation{guo2017calibration}
+\citation{buneman2001provenance}
+\citation{rahm2001schema}
+\citation{reimers2019sbert}
+\citation{houlsby2019adapters}
+\citation{hu2022lora}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-B}}Layout-Aware Pre-Trained Models}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-C}}OCR-Free and Generative Document Models}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-D}}LLM and VLM Extraction}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-E}}Combining Multiple Extractors}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-F}}Schema Matching and Retrieval}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-G}}Parameter-Efficient Adaptation}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {III}Identified Gaps and Problem Statement}{2}{}\protected@file@percent }
+\newlabel{sec:gaps}{{III}{2}{}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-A}}Identified Gaps}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-B}}Problem Statement}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {IV}System Architecture and Methodology}{3}{}\protected@file@percent }
+\newlabel{sec:arch}{{IV}{3}{}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Document Ingestion with OCR Fallback}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Parallel Extraction}{3}{}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Pipeline architecture: ingestion, the eight orchestrator stages and the two parallel extraction branches.}}{3}{}\protected@file@percent }
+\newlabel{fig:system_architecture}{{1}{3}{}{figure.1}{}}
+\newlabel{eq:donut_conf}{{1}{3}{}{equation.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-C}}Evidence-Based Policy Fusion}{4}{}\protected@file@percent }
+\newlabel{sec:fusion}{{\mbox  {IV-C}}{4}{}{subsection.4.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}LoRA Adapter-Routed Layout Analysis}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Schema Registry, Validation and Storage}{4}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Layout labelling macro-F1 (mean $\pm $ std, three seeds).}}{5}{}\protected@file@percent }
+\newlabel{tab:lora_results}{{I}{5}{}{table.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {V}Experimental Results and Evaluation}{5}{}\protected@file@percent }
+\newlabel{sec:eval}{{V}{5}{}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Experimental Setup}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Layout Adapters}{5}{}\protected@file@percent }
+\newlabel{sec:res_lora}{{\mbox  {V-B}}{5}{}{subsection.5.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Training (solid) and validation (dashed) loss per epoch (seed means).}}{5}{}\protected@file@percent }
+\newlabel{fig:ft_loss}{{2}{5}{}{figure.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Per-class test F1 gain of LoRA over the frozen head.}}{5}{}\protected@file@percent }
+\newlabel{fig:ft_gain}{{3}{5}{}{figure.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces End-to-end token-overlap F1 and exact match (EM).}}{6}{}\protected@file@percent }
+\newlabel{tab:e2e_aggregate}{{II}{6}{}{table.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Ablation (token-overlap F1; CORD hallucination rate in parentheses).}}{6}{}\protected@file@percent }
+\newlabel{tab:ablation}{{III}{6}{}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}End-to-End Extraction}{6}{}\protected@file@percent }
+\newlabel{sec:res_e2e}{{\mbox  {V-C}}{6}{}{subsection.5.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Ablation}{6}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Per-field token-overlap F1.}}{6}{}\protected@file@percent }
+\newlabel{tab:perfield}{{IV}{6}{}{table.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-E}}Audit Trail and Error Attribution}{6}{}\protected@file@percent }
+\newlabel{sec:res_audit}{{\mbox  {V-E}}{6}{}{subsection.5.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces CORD: predicted values where the gold value is empty.}}{7}{}\protected@file@percent }
+\newlabel{fig:halluc}{{4}{7}{}{figure.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Median seconds per document by stage, against a standalone VLM call.}}{7}{}\protected@file@percent }
+\newlabel{fig:latency}{{5}{7}{}{figure.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-F}}Latency}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-G}}Schema Registry Retrieval}{7}{}\protected@file@percent }
+\newlabel{sec:res_schema}{{\mbox  {V-G}}{7}{}{subsection.5.7}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces Schema retrieval precision and recall against threshold $\sigma $.}}{7}{}\protected@file@percent }
+\newlabel{fig:schema_pr_curve}{{6}{7}{}{figure.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VI}Conclusion}{7}{}\protected@file@percent }
+\newlabel{sec:conclusion}{{VI}{7}{}{section.6}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VII}Limitations}{7}{}\protected@file@percent }
+\newlabel{sec:limitations}{{VII}{7}{}{section.7}{}}
+\citation{stanislawek2021kleister}
+\citation{cuad2021}
+\bibcite{layoutlm}{1}
+\bibcite{layoutlmv2}{2}
+\bibcite{layoutlmv3}{3}
+\bibcite{kim2022donut}{4}
+\bibcite{chiticariu2013rule}{5}
+\bibcite{hong2022bros}{6}
+\bibcite{wang2022lilt}{7}
+\bibcite{luo2023geolayoutlm}{8}
+\bibcite{lee2022formnet}{9}
+\bibcite{jaume2019funsd}{10}
+\bibcite{park2019cord}{11}
+\bibcite{huang2019sroie}{12}
+\bibcite{pfitzmann2022doclaynet}{13}
+\bibcite{smith2007tesseract}{14}
+\bibcite{lee2023pix2struct}{15}
+\bibcite{gptner2025}{16}
+\bibcite{cuad2021}{17}
+\bibcite{stanislawek2021kleister}{18}
+\bibcite{react2023}{19}
+\bibcite{bai2025qwen25vl}{20}
+\bibcite{fiscus1997rover}{21}
+\bibcite{guo2017calibration}{22}
+\bibcite{buneman2001provenance}{23}
+\bibcite{rahm2001schema}{24}
+\bibcite{reimers2019sbert}{25}
+\bibcite{houlsby2019adapters}{26}
+\bibcite{hu2022lora}{27}
+\@writefile{toc}{\contentsline {section}{\numberline {VIII}Future Work}{8}{}\protected@file@percent }
+\newlabel{sec:future}{{VIII}{8}{}{section.8}{}}
+\@writefile{toc}{\contentsline {section}{References}{8}{}\protected@file@percent }
+\gdef \@abspage@last{8}

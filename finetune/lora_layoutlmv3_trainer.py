@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -141,19 +142,29 @@ def _cord_ner_to_layout(tag_name: str) -> str:
     return "paragraph"
 
 
-def _make_lora_config(group_name: str):
+# Q, K, V and attention-output projections only. A bare "dense" target would
+# also match the feed-forward layers, so the pattern is anchored to attention.
+ENCODING_VERSION = 1   # bump when _encode_example changes, to invalidate cached encodings
+LORA_RANK = 16
+LORA_ALPHA = 32
+LORA_DROPOUT = 0.05
+LORA_TARGET_REGEX = r".*encoder\.layer\.\d+\.attention\.(self\.(query|key|value)|output\.dense)"
+GRAD_ACCUM_STEPS = 8
+WARMUP_RATIO = 0.06
+
+
+def _make_lora_config():
     try:
         from peft import LoraConfig, TaskType
     except ImportError:
         raise RuntimeError("peft not installed. Run: pip install peft")
 
-    r = 32 if group_name == "group_3" else 16
     return LoraConfig(
         task_type=TaskType.TOKEN_CLS,
-        r=r,
-        lora_alpha=r * 2,
-        target_modules=["query", "value"],
-        lora_dropout=0.1,
+        r=LORA_RANK,
+        lora_alpha=LORA_ALPHA,
+        target_modules=LORA_TARGET_REGEX,
+        lora_dropout=LORA_DROPOUT,
         bias="none",
         inference_mode=False,
     )
@@ -271,8 +282,13 @@ def _load_hf_native(dataset_name: str, max_train: Optional[int], max_val: Option
         raise ValueError(f"No HF-native repo registered for '{dataset_name}'. "
                          f"Available: {list(_HF_NATIVE_REPOS)}")
     ds = load_dataset(repo)
-    train_split = ds.get("train") or ds[next(iter(ds))]
-    val_split   = ds.get("test") or ds.get("validation") or train_split
+    train_split = ds["train"]
+    if "validation" in ds:
+        val_split = ds["validation"]
+    else:
+        # Keep the dataset's test split out of training and early stopping.
+        sp = train_split.train_test_split(test_size=0.1, seed=42)
+        train_split, val_split = sp["train"], sp["test"]
     if max_train:
         train_split = train_split.select(range(min(max_train, len(train_split))))
     if max_val:
@@ -452,7 +468,7 @@ class _WeightedTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self._class_weights = class_weights
 
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
@@ -463,6 +479,11 @@ class _WeightedTrainer(Trainer):
             weight=weight,
             ignore_index=-100,
         )
+        # When the Trainer is given num_items_in_batch it skips dividing by the
+        # accumulation steps, so a per-batch mean loss would be logged (and
+        # applied) grad_accum times too large. Divide here to keep it a mean.
+        if num_items_in_batch is not None and self.model.training:
+            loss = loss / self.args.gradient_accumulation_steps
         return (loss, outputs) if return_outputs else loss
 
 
@@ -480,7 +501,13 @@ def train_lora_layoutlmv3(
     hf_native_datasets: Optional[List[str]] = None,
     max_train_samples: Optional[int] = None,
     max_val_samples: Optional[int] = None,
+    seed: int = 42,
+    train_mode: str = "lora",
 ) -> Dict:
+    """train_mode: "lora" trains the adapters plus the classifier head;
+    "frozen" is the baseline that trains the classifier head on the frozen backbone."""
+    if train_mode not in ("lora", "frozen"):
+        raise ValueError(f"train_mode must be 'lora' or 'frozen', got {train_mode!r}")
     try:
         from peft import get_peft_model
     except ImportError:
@@ -498,6 +525,9 @@ def train_lora_layoutlmv3(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    from transformers import set_seed
+    set_seed(seed)
+
     logger.info("[LoRA-%s] Loading base model microsoft/layoutlmv3-base", group_name)
     processor = LayoutLMv3Processor.from_pretrained(
         "microsoft/layoutlmv3-base", apply_ocr=True, use_fast=True
@@ -510,9 +540,15 @@ def train_lora_layoutlmv3(
         ignore_mismatched_sizes=True,
     )
 
-    lora_cfg = _make_lora_config(group_name)
-    model = get_peft_model(model_base, lora_cfg)
-    model.print_trainable_parameters()
+    if train_mode == "lora":
+        model = get_peft_model(model_base, _make_lora_config())
+        model.print_trainable_parameters()
+    else:
+        model = model_base
+        for name, param in model.named_parameters():
+            param.requires_grad = name.startswith("classifier.")
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
 
     # ------------------------------------------------------------------
     # Encoding: HF-native path or segment-containment path
@@ -520,20 +556,11 @@ def train_lora_layoutlmv3(
     if hf_native_datasets:
         from datasets import concatenate_datasets
         train_parts, val_parts = [], []
-        # Accumulate label names across all native datasets so label2id is consistent
-        all_label_names: List[str] = list(label2id.keys())
-
         for ds_name in hf_native_datasets:
             logger.info("[LoRA-%s] Loading HF-native dataset: %s", group_name, ds_name)
             tr, va = _load_hf_native(ds_name, max_train_samples, max_val_samples)
-            # Extend label2id with any new labels from this dataset
+            # Native tags are mapped onto the fixed layout label space; never extend it.
             native_labels = _label_list_from_hf_native(tr)
-            for lbl in native_labels:
-                if lbl not in label2id:
-                    new_id = len(label2id)
-                    label2id[lbl] = new_id
-                    id2label[new_id] = lbl
-                    all_label_names.append(lbl)
             logger.info("[LoRA-%s] Preprocessing HF-native train (%s) ...", group_name, ds_name)
             train_parts.append(_preprocess_hf_native(tr, processor, max_length, label2id, native_labels, ds_name))
             logger.info("[LoRA-%s] Preprocessing HF-native val (%s) ...", group_name, ds_name)
@@ -542,10 +569,29 @@ def train_lora_layoutlmv3(
         encoded_train = concatenate_datasets(train_parts)
         encoded_val   = concatenate_datasets(val_parts)
     else:
-        logger.info("[LoRA-%s] Preprocessing train split ...", group_name)
-        encoded_train = _preprocess_dataset(train_dataset, processor, max_length, label2id)
-        logger.info("[LoRA-%s] Preprocessing val split ...", group_name)
-        encoded_val   = _preprocess_dataset(val_dataset, processor, max_length, label2id)
+        # Encoding runs Tesseract per page (about 1.5 pages/s), and it does not
+        # depend on the training seed, so encoded splits are cached on disk.
+        from datasets import load_from_disk
+        from normalizers import NORMALIZATION_VERSION
+
+        enc_dir = Path("data") / "intermediate" / "finetune_encoded" / (
+            f"{group_name}_L{max_length}_n{len(train_dataset)}_{len(val_dataset)}"
+            f"_norm{NORMALIZATION_VERSION}_enc{ENCODING_VERSION}"
+        )
+        if (enc_dir / "train").exists() and (enc_dir / "val").exists():
+            logger.info("[LoRA-%s] Reusing encoded cache %s", group_name, enc_dir)
+            encoded_train = load_from_disk(str(enc_dir / "train"))
+            encoded_val = load_from_disk(str(enc_dir / "val"))
+            encoded_train.set_format("torch")
+            encoded_val.set_format("torch")
+        else:
+            logger.info("[LoRA-%s] Preprocessing train split ...", group_name)
+            encoded_train = _preprocess_dataset(train_dataset, processor, max_length, label2id)
+            logger.info("[LoRA-%s] Preprocessing val split ...", group_name)
+            encoded_val   = _preprocess_dataset(val_dataset, processor, max_length, label2id)
+            enc_dir.mkdir(parents=True, exist_ok=True)
+            encoded_train.save_to_disk(str(enc_dir / "train"))
+            encoded_val.save_to_disk(str(enc_dir / "val"))
 
     _log_supervision_stats(encoded_train, "train", group_name, id2label)
     _log_supervision_stats(encoded_val,   "validation", group_name, id2label)
@@ -558,15 +604,22 @@ def train_lora_layoutlmv3(
         preds, labels_active = preds[mask], labels_flat[mask]
         if labels_active.size == 0:
             return {"macro_f1": 0.0, "accuracy": 0.0}
-        return {
+        metrics = {
             "macro_f1": round(f1_score(labels_active, preds, average="macro", zero_division=0), 4),
             "accuracy": round(float((preds == labels_active).mean()), 4),
         }
+        # Per-class F1 for classes with validation support, so the headline macro
+        # number can be traced to the classes holding it back.
+        present = sorted(int(c) for c in np.unique(labels_active))
+        per_class = f1_score(labels_active, preds, labels=present, average=None, zero_division=0)
+        for cls, score in zip(present, per_class):
+            metrics[f"f1_{id2label[cls]}"] = round(float(score), 4)
+        return metrics
 
     csv_logger = EpochCSVLogger(output_dir / "training_log.csv")
-    grad_accum = 2
+    grad_accum = GRAD_ACCUM_STEPS
     steps_per_epoch = max(1, int(np.ceil(len(encoded_train) / max(batch_size * grad_accum, 1))))
-    warmup_steps = max(1, steps_per_epoch)  # 1 epoch warmup
+    warmup_steps = max(1, int(round(WARMUP_RATIO * steps_per_epoch * epochs)))
 
     args = TrainingArguments(
         output_dir=str(output_dir / "checkpoints"),
@@ -575,7 +628,9 @@ def train_lora_layoutlmv3(
         gradient_accumulation_steps=grad_accum,
         learning_rate=learning_rate,
         warmup_steps=warmup_steps,
-        lr_scheduler_type="cosine_with_restarts",
+        lr_scheduler_type="cosine",
+        seed=seed,
+        data_seed=seed,
         num_train_epochs=epochs,
         bf16=torch.cuda.is_available(),
         fp16=False,
@@ -586,6 +641,8 @@ def train_lora_layoutlmv3(
         load_best_model_at_end=True,
         metric_for_best_model="macro_f1",
         greater_is_better=True,
+        # Frozen-baseline checkpoints hold the whole 500 MB model; keep best + latest.
+        save_total_limit=2 if train_mode == "frozen" else None,
         remove_unused_columns=False,
         logging_steps=25,
         report_to="none",
@@ -604,10 +661,73 @@ def train_lora_layoutlmv3(
     )
 
     logger.info("[LoRA-%s] Starting training ...", group_name)
-    trainer.train()
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    t_start = time.time()
+    train_result = trainer.train()
+    train_seconds = time.time() - t_start
 
-    model.save_pretrained(str(output_dir))
+    if train_mode == "lora":
+        model.save_pretrained(str(output_dir))
+    else:
+        torch.save(model.classifier.state_dict(), output_dir / "classifier_head.pt")
     processor.save_pretrained(str(output_dir))
+
+    adapter_bytes = sum(
+        f.stat().st_size for f in
+        list(output_dir.glob("adapter_model.*")) + list(output_dir.glob("classifier_head.pt"))
+    )
+    epochs_run = train_result.metrics.get("epoch") or epochs
+    # Table II and the compute-cost table are generated from this file.
+    (output_dir / "run_config.json").write_text(
+        json.dumps(
+            {
+                "group": group_name,
+                "seed": seed,
+                "train_mode": train_mode,
+                "base_model": "microsoft/layoutlmv3-base",
+                "lora": {
+                    "r": LORA_RANK,
+                    "alpha": LORA_ALPHA,
+                    "dropout": LORA_DROPOUT,
+                    "target_regex": LORA_TARGET_REGEX,
+                },
+                "optimizer": {
+                    "learning_rate": learning_rate,
+                    "weight_decay": args.weight_decay,
+                    "max_grad_norm": args.max_grad_norm,
+                    "scheduler": args.lr_scheduler_type,
+                    "warmup_steps": warmup_steps,
+                    "warmup_ratio": WARMUP_RATIO,
+                },
+                "batch": {
+                    "per_device": batch_size,
+                    "grad_accum": grad_accum,
+                    "effective": batch_size * grad_accum,
+                },
+                "epochs_max": epochs,
+                "epochs_run": epochs_run,
+                "early_stopping_patience": 3,
+                "precision": "bf16" if args.bf16 else "fp32",
+                "class_weighted_loss": True,
+                "max_length": max_length,
+                "train_examples": len(encoded_train),
+                "val_examples": len(encoded_val),
+                "trainable_params": trainable_params,
+                "total_params": total_params,
+                "adapter_bytes": adapter_bytes,
+                "train_seconds": round(train_seconds, 1),
+                "seconds_per_epoch": round(train_seconds / max(float(epochs_run), 1.0), 1),
+                "peak_gpu_mem_mb": (
+                    round(torch.cuda.max_memory_allocated() / 2**20, 1)
+                    if torch.cuda.is_available() else None
+                ),
+                "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     metrics = trainer.evaluate()
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")

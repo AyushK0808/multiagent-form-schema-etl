@@ -38,8 +38,11 @@ class DatasetSpec:
     description:      str
     annotation_type:  str
     curriculum_order: int
-    config_name:      Optional[str] = None   # ← add this
-    trust_remote_code: bool = False           # ← add this
+    config_name:      Optional[str] = None
+    trust_remote_code: bool = False
+    # Restrict which repo files are downloaded (glob patterns per split), for
+    # datasets too large to fetch whole when only a capped sample is trained on.
+    data_files:       Optional[Dict[str, str]] = None
 
 
 DATASET_SPECS: Dict[str, DatasetSpec] = {
@@ -53,7 +56,6 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
         name="CORD", repo_id="naver-clova-ix/cord-v2",
         schema_name="cord_receipt", description="Receipts",
         annotation_type="segment", curriculum_order=1,
-        config_name="cord-v2",
     ),
     "SROIE": DatasetSpec(
         name="SROIE", repo_id="rth/sroie-2019-v2",
@@ -82,7 +84,11 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
     name="DOCLAYNET", repo_id="docling-project/DocLayNet-v1.2",
     schema_name="doclaynet_layout", description="Multi-domain document layout",
     annotation_type="segment", curriculum_order=2,
-    trust_remote_code=True,        # ← fix: uses legacy dataset script
+    # First 5 train shards (~5.5k pages) and 1 validation shard of the 72/7 available.
+    data_files={
+        "train": "data/train-0000[0-4]-of-00072.parquet",
+        "validation": "data/validation-00000-of-00007.parquet",
+    },
 ),
     "KLEISTER_NDA": DatasetSpec(
         name="KLEISTER_NDA", repo_id="lhoestq/kleister-nda",
@@ -116,3 +122,7 @@ DATASET_SPECS: Dict[str, DatasetSpec] = {
         annotation_type="qa", curriculum_order=1,
     ),
 }
+
+# Per-dataset resampling weights. Empty = every dataset weighs 1.0; train_lora.py
+# also disables resampling, so datasets keep their natural size under the per-dataset cap.
+DATASET_WEIGHTS: Dict[str, float] = {}

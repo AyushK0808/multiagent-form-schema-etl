@@ -27,21 +27,21 @@ class ModelConfig:
     schema_recognition_layout_model: str = "models/schema_recognition/layoutlmv3"
     schema_recognition_layout_fallback_model: str = "microsoft/layoutlmv3-base"
 
-    # LoRA adapter root  — each group lives at <adapter_root>/group_{1,2,3}/layoutlmv3/
+    # LoRA adapter root  — each group lives at <adapter_root>/group_{1,2}/layoutlmv3/
     # Set to "" to disable adapter routing and fall back to legacy checkpoint.
     adapter_root: str = "models/adapters"
 
     # Text LLM backend
-    llm_model:       str   = "google/flan-t5-base"
+    llm_model:       str   = "ollama/llama3.2:3b"
     llm_temperature: float = 0.1
     llm_max_tokens:  int   = 256
 
     # Donut OCR-free extractor
-    donut_model: str = "naver-clova-ix/donut-base"
+    donut_model: str = field(default_factory=lambda: os.getenv("DONUT_MODEL", "naver-clova-ix/donut-base-finetuned-docvqa"))
     schema_recognition_donut_model: str = "models/schema_recognition/donut"
     schema_recognition_donut_fallback_model: str = "naver-clova-ix/donut-base"
 
-    # LoRA Donut adapter root — each group at <donut_adapter_root>/group_{1,2,3}/donut/
+    # LoRA Donut adapter root — each group at <donut_adapter_root>/group_{1,2}/donut/
     donut_adapter_root: str = "models/adapters"
 
     # Device for local models
@@ -58,9 +58,10 @@ class ModelConfig:
 class GroqConfig:
     """Configuration for the Groq-hosted LLM (schema-resolution agent)."""
     api_key:  str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
-    small_model: str = "llama-3.1-8b-instant"
-    synthesis_model: str = "llama-3.3-70b-versatile"
-    vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # The Llama models used originally are no longer served by Groq.
+    small_model: str = "openai/gpt-oss-20b"
+    synthesis_model: str = "openai/gpt-oss-120b"
+    vision_model: str = "qwen/qwen3.8-27b"
     temperature: float = 0.0
     max_tokens:  int   = 1024
 
@@ -71,6 +72,7 @@ class ProcessingConfig:
     ocr_threshold:        int   = 50
     max_page_size:        int   = 5000
     confidence_threshold: float = 0.70
+    max_pages:            int   = 6
     schema_sim_threshold: float = 0.70
     enable_parallel_extraction: bool = True
 
@@ -103,6 +105,10 @@ class Config:
     groq:       GroqConfig       = field(default_factory=GroqConfig)
     processing: ProcessingConfig = field(default_factory=ProcessingConfig)
     paths:      PathConfig       = field(default_factory=PathConfig)
+
+    # Vision backend: "groq" (hosted) or "ollama" (fully local)
+    vision_backend:       str = field(default_factory=lambda: os.getenv("VISION_BACKEND", "groq"))
+    ollama_vision_model:  str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b"))
 
     # Feature flags
     enable_validation:           bool = True

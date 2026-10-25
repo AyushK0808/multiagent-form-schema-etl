@@ -66,6 +66,7 @@ class PDFIngester:
             "total_pages": len(doc),
             "ocr_pages": [],
             "native_pages": [],
+            "ocr_mean_confidence": None,
             "title": doc.metadata.get("title", ""),
             "author": doc.metadata.get("author", "")
         }
@@ -75,6 +76,10 @@ class PDFIngester:
             blocks.extend(page_blocks)
         
         
+        ocr_conf = [b.confidence for b in blocks if b.source == "ocr"]
+        if ocr_conf:
+            metadata["ocr_mean_confidence"] = round(sum(ocr_conf) / len(ocr_conf), 4)
+
         logger.info(f"Ingested {len(blocks)} blocks from {len(doc)} pages")
         doc.close()
         return blocks, metadata
@@ -111,32 +116,60 @@ class PDFIngester:
         return blocks
     
     def _ocr_page(self, page, page_idx: int) -> List[DocumentBlock]:
-        """Apply OCR to a page."""
+        """
+        Apply OCR to a page and return one block per Tesseract text line.
+
+        Each block's confidence is the mean Tesseract word confidence of its
+        words (rescaled to 0-1); its bbox is in page coordinates (points), the
+        same space as native blocks.
+        """
         try:
             # Render page to image
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x resolution for better OCR
-            
+
             # Resize if too large
             if max(pix.width, pix.height) > self.max_page_size:
                 scale = self.max_page_size / max(pix.width, pix.height)
                 pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-            
+
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            
-            # Perform OCR
-            ocr_text = pytesseract.image_to_string(img)
-            
-            if ocr_text.strip():
-                return [DocumentBlock(
+            sx = page.rect.width / pix.width
+            sy = page.rect.height / pix.height
+
+            # --psm 6 (uniform text block) recovers more receipt numbers than the
+            # default page segmentation; chosen on the CORD validation split.
+            data = pytesseract.image_to_data(img, config="--psm 6", output_type=pytesseract.Output.DICT)
+
+            lines: Dict[tuple, List[int]] = {}
+            for i, word in enumerate(data["text"]):
+                try:
+                    conf = float(data["conf"][i])
+                except (TypeError, ValueError):
+                    continue
+                if not str(word).strip() or conf < 0:  # conf -1 marks non-word rows
+                    continue
+                key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+                lines.setdefault(key, []).append(i)
+
+            blocks = []
+            for key in sorted(lines):
+                idx = lines[key]
+                x0 = min(data["left"][i] for i in idx)
+                y0 = min(data["top"][i] for i in idx)
+                x1 = max(data["left"][i] + data["width"][i] for i in idx)
+                y1 = max(data["top"][i] + data["height"][i] for i in idx)
+                mean_conf = sum(float(data["conf"][i]) for i in idx) / len(idx) / 100.0
+                blocks.append(DocumentBlock(
                     page=page_idx,
-                    text=ocr_text,
-                    bbox=None,
-                    confidence=0.8,  # Lower confidence for OCR
-                    source="ocr"
-                )]
+                    text=" ".join(str(data["text"][i]).strip() for i in idx),
+                    bbox=(x0 * sx, y0 * sy, x1 * sx, y1 * sy),
+                    confidence=round(mean_conf, 4),
+                    source="ocr",
+                ))
+            return blocks
         except Exception as e:
             logger.error(f"OCR failed for page {page_idx}: {e}")
-        
+
         return []
 
 

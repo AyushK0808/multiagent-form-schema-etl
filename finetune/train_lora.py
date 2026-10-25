@@ -4,15 +4,15 @@ finetune/train_lora.py
 CLI entry point for LoRA adapter training.
 
 Trains one LoRA adapter per group (or a specific subset) using the
-three-group curriculum defined in adapter_groups.py.
+two adapter groups defined in adapter_groups.py.
 
 Usage examples
 --------------
-# Train all three adapter groups
+# Train both adapter groups with the default seed
 python train_lora.py
 
-# Train only group_3 (reasoning/NDA) — useful after adding new datasets
-python train_lora.py --groups group_3
+# Train only group_2, seed 13, into its own output root
+python train_lora.py --groups group_2 --seed 13 --output-root models/adapters_seed13
 
 # Quick smoke-test
 python train_lora.py --max-train-samples 100 --no-augment
@@ -21,7 +21,7 @@ python train_lora.py --max-train-samples 100 --no-augment
 python train_lora.py --model layoutlmv3
 
 # Restrict to specific datasets across all selected groups
-python train_lora.py --groups group_1 group_2 --datasets CORD FUNSD SROIE
+python train_lora.py --groups group_1 group_2 --datasets CORD FUNSD
 """
 from __future__ import annotations
 
@@ -51,17 +51,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="LoRA adapter training (3-group curriculum)")
+    parser = argparse.ArgumentParser(description="LoRA adapter training (two adapter groups)")
     parser.add_argument(
         "--model",
         choices=("layoutlmv3", "donut", "both"),
-        default="both",
+        default="layoutlmv3",
     )
     parser.add_argument(
         "--groups",
         nargs="+",
-        choices=["group_1", "group_2", "group_3"],
-        default=["group_1", "group_2", "group_3"],
+        choices=["group_1", "group_2"],
+        default=["group_1", "group_2"],
         help="Which adapter groups to train",
     )
     parser.add_argument(
@@ -96,9 +96,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=5e-5,
                         help="Higher than full fine-tune is fine; only adapters update")
     parser.add_argument("--max-length",    type=int,   default=512)
-    parser.add_argument("--max-train-samples", type=int,
-                        help="Cap per-dataset training samples (debug)")
+    parser.add_argument("--max-train-samples", type=int, default=5000,
+                        help="Cap per-dataset training samples (default 5000)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Training seed (the train/validation split seed is fixed)")
     parser.add_argument("--max-val-samples",   type=int)
+    parser.add_argument(
+        "--baseline", choices=("lora", "frozen"), default="lora",
+        help="'frozen' trains only the classifier head on the frozen backbone (LoRA ablation)",
+    )
     parser.add_argument("--no-augment",    action="store_true")
     parser.add_argument(
         "--hf-native",
@@ -166,6 +172,7 @@ def _train_group(
         refresh_augmented_cache=args.refresh_augmented_cache,
         augment_train=augment,
         curriculum=True,
+        apply_weights=False,
     )
     label2id, id2label = build_group_label_space(available, train_ds, val_ds)
     log_dataset_label_distribution(train_ds, "train", grp.name)
@@ -217,6 +224,8 @@ def _train_group(
             hf_native_datasets=hf_native,
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
+            seed=args.seed,
+            train_mode=args.baseline,
         )
 
     # Donut adapter

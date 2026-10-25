@@ -1,0 +1,82 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+\newcommand{\rc}[1]{\par\medskip\textbf{Comment.} \emph{#1}\par}
+\newcommand{\rr}{\textbf{Response.}\ }
+
+\begin{document}
+
+\begin{center}\Large\textbf{Response to Reviewers --- Paper 434}\end{center}
+\begin{center}\textit{Policy-Guided Schema-Aware Framework for Semi-Structured Document Information Extraction}\end{center}
+
+We thank the reviewers for their careful reading. The revision rebuilds the evaluation on public benchmarks with a correctness metric, a strong vision-language-model (VLM) baseline, single-branch baselines, an ablation and a rule-level error attribution, and it retrains the LoRA adapters with seeds, held-out test splits and a frozen-backbone baseline. Auditing the code against the manuscript also showed that the original ``F1'' measured whether a field was filled, not whether it was correct, and that the LoRA adapters are not part of the field-extraction path; both are corrected and stated in the paper. Section and table numbers below refer to the revised manuscript. Reviewer comments are paraphrased from our revision notes; \textcolor{red}{replace with the verbatim comments before submission}.
+
+\section*{Summary of changes}
+\begin{itemize}[leftmargin=*,nosep]
+\item \textbf{Metric.} Per-field token-overlap F1 and exact match replace the fill-based F1. The earlier 0.950 headline is withdrawn.
+\item \textbf{Evaluation.} End-to-end evaluation on seeded subsets of the SROIE test set (100 receipts) and the CORD test set (50 receipts), plus the 15-document synthetic multi-page set, against a local Qwen2.5-VL-7B baseline and single-branch baselines, with an ablation, per-field results, an audit-based error attribution and a latency breakdown (Section V-C to V-F, Tables II--IV).
+\item \textbf{Fusion policy.} Rewritten around evidence (type validity, duplicated answers, clause length, grounding in the OCR text) instead of Donut's uncalibrated confidence; Algorithm~1 now matches the code.
+\item \textbf{LoRA.} Retrained with the configuration in Section IV-D, three seeds, a validation split separated from training, held-out test results, cross-group results and a frozen-backbone baseline (Table~I, Figs.~2--3).
+\item \textbf{Branch naming.} The ``LayoutLM branch'' is renamed the OCR-LLM branch; it never ran LayoutLMv3. The LoRA adapters are reported as a layout component evaluated on their own.
+\item \textbf{Presentation.} Contributions are listed explicitly; related work is organised in four threads with a stated gap; all figures are redrawn as vector graphics; redundant figures are removed so that the paper fits eight pages.
+\end{itemize}
+
+\section*{Reviewer 1 (accept, minor revision)}
+
+\rc{The 15-document end-to-end evaluation is small; please justify it.}
+\rr The main results now use 100 SROIE and 50 CORD test receipts drawn with a fixed seed, with no setting tuned on them. The 15 synthetic documents are kept because they are the only set with multi-page, clause-level fields, and they are described as synthetic and author-written (Section VII). The subset sizes bound the cost of running a 7B VLM on an 8\,GB laptop GPU, and the paper states that differences under 0.02 F1 are not resolved at this sample size.
+
+\rc{Why exactly two adapter groups?}
+\rr Only four of the datasets we considered carry token- or region-level layout labels usable for the layout-labelling objective: CORD and SROIE (receipts and invoices, Group~1) and FUNSD and DocLayNet (forms and multi-domain pages, Group~2). The datasets without such labels (DocVQA, Kleister-NDA) cannot train this objective. Table~I shows the groups are specialised: macro-F1 falls to 0.195 and 0.128 on the other group's test set, which supports routing per document style (Sections IV-D and V-B).
+
+\section*{Reviewer 2 (reject)}
+
+\rc{The abstract lacks a problem statement and the need for the method; the literature review should be rewritten; novelty is unclear.}
+\rr The abstract now opens with the problem (typed fields that must be correct, schema-conformant and traceable to the page) and summarises the findings on every dataset, including SROIE, where the VLM is strongest; following the formatting guidance, it gives no numbers, which appear in the body. The introduction lists four contributions. Related work is expanded into seven threads (rule-based extraction, layout-aware models, OCR-free models, LLM and VLM extraction, combination of multiple extractors, schema matching, parameter-efficient adaptation), and a separate section (Section III) states the identified gaps and a formal problem statement; references that were never cited were cited or removed, and CUAD is described as a dataset. The novelty is the evidence-based, auditable reconciliation of an OCR-free and an OCR-text extractor under a runtime schema, evaluated against a direct VLM baseline.
+
+\rc{The results are not convincing.}
+\rr The original F1 credited any non-null prediction, so Donut scored 1.000 with every value wrong; this is corrected and the old figures are withdrawn. The new results (Tables II--IV) are measured with a correctness metric on public test sets. The pipeline reaches 0.980 F1 on the multi-page set (VLM 0.973), improves on its strongest branch on CORD and equals the VLM's exact-match rate there (0.900), while the VLM leads on SROIE (0.992 against 0.801). The ablation isolates grounding as the decisive fusion component (+0.031 F1 on SROIE), and the audit record traces the SROIE gap between the pipeline and its branch to a single clause-length rule (Section V-E).
+
+\rc{Figures are poor.}
+\rr All figures are redrawn as vector graphics with larger labels. Fig.~1 shows the two branches, the grounding step and the position of the LoRA adapters; figures that repeated table data were removed.
+
+\section*{Reviewer 3 (accept, major revision)}
+
+\rc{Novelty should be sharper.}
+\rr See the response to Reviewer~2. The contributions are now stated explicitly in the introduction, and Section III sets out the gaps they address and the problem statement. Limitations and future work are given in separate sections (Sections VII and VIII).
+
+\rc{Use larger public benchmarks.}
+\rr SROIE and CORD test subsets are used for end-to-end evaluation (100 and 50 documents); the full 347- and 100-page test sets, together with FUNSD (50) and 834 DocLayNet test pages, are used for the adapter evaluation. End-to-end evaluation on long multi-page contracts with public annotations is listed as future work.
+
+\rc{Add external baselines.}
+\rr Added: a VLM-only baseline (Qwen2.5-VL-7B given the page image and schema), Donut alone, the text-LLM first pass alone, and the OCR-LLM branch alone, on the same documents and metric (Table~II). The adapters are compared with a frozen-backbone baseline under the same data, seeds and schedule; they are not compared with published LayoutLMv3 numbers because the unified six-class label space differs from the original CORD and FUNSD protocols.
+
+\rc{The similarity threshold is given as 0.70 in places and 0.80 in others.}
+\rr $\sigma = 0.70$ is used throughout. The retrieval figure (Fig.~6) is regenerated from a 50-query labelled set; at 0.70 precision is 1.00 with no false acceptance and recall 0.575, and the text gives the full trade-off (Section V-G).
+
+\rc{How well do the LoRA adapters generalise?}
+\rr Added: test-split results (mean $\pm$ std over seeds 13, 42 and 1234), cross-group evaluation, and a frozen-backbone baseline with a trained head. Test macro-F1 is 0.774 and 0.739 for LoRA against 0.706 and 0.550 frozen (Group~2 frozen baseline: one seed), with seed standard deviation at most 0.008 (Table~I, Figs.~2--3). The paper states that the adapters are evaluated as a layout component and that using their region labels in field extraction is the next integration step.
+
+\rc{Report the compute cost.}
+\rr Reported: 1.18M trainable parameters (0.94\%), 4.5\,MB per adapter, training time per epoch and peak memory (2.9\,GB) on the named GPU (RTX~5060 Laptop, 8\,GB), and per-stage median latency per document (Fig.~5). Fusion takes under 3\,ms; on SROIE the pipeline needs 14.3\,s per receipt against 19.5\,s for a standalone VLM call, and on CORD and the multi-page set it is slower (29.7\,s and 24.4\,s), as stated in Section V-F.
+
+\rc{Document the splits, seeds and scripts.}
+\rr Section V-A lists seeds, checkpoints, how validation sets were obtained (a seeded 10\% hold-out where a dataset ships none; previously the test sets served as validation for FUNSD and SROIE, which is fixed), the subset protocol and the repository. The scripts and result files for the benchmark, the timing measurement, the schema-matching curve and the figures are in the repository.
+
+\rc{Add a failure analysis.}
+\rr Added (Section V-E, Table~IV, Fig.~4). Because every fused value records the rule that selected it, the differences between the pipeline and its OCR-LLM branch are attributed exactly: on CORD five of six changed values become correct and none becomes wrong; on SROIE all 14 degraded values are addresses whose correct OCR-LLM value exceeded the ten-word clause test. On CORD, hallucinations are dominated by the subtotal field (copied from the total on receipts that print no subtotal), and sparse Tesseract output explains why the Donut-only and text-only rows are near zero there.
+
+\rc{Proofreading.}
+\rr The manuscript was edited throughout, including the fusion text (``two fields'' versus three), the determinism claim (now scoped to the fusion layer), the OCR-confidence description, the model names (GPT-OSS for the schema agent) and the LoRA configuration, which now matches the trainer.
+
+\section*{Scope of the revision}
+\begin{itemize}[leftmargin=*,nosep]
+\item Each configuration was run once; run-to-run variation of the language-model stages was not measured.
+\item The public benchmark subsets are receipts with four to six fields; the LoRA adapters are not yet connected to field extraction.
+\item The schema-agent repair step uses a hosted model; every other model stage in the evaluation runs locally.
+\end{itemize}
+
+\end{document}

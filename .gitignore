@@ -5,4 +5,5 @@ data/
 .env
 models
 figures
-plots.py
+plots.pyresults_*/
+results_smoke/

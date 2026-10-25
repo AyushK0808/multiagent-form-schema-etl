@@ -7,8 +7,6 @@ import logging
 from collections import Counter
 from typing import Dict, Iterable, List, Sequence, Tuple
 
-from dataset_mappings.funsd import FUNSD_BIO_LABELS
-
 logger = logging.getLogger(__name__)
 
 LAYOUT_LABELS: List[str] = [
@@ -38,23 +36,20 @@ def _make_maps(labels: Sequence[str]) -> Tuple[Dict[str, int], Dict[int, str]]:
 
 
 def build_group_label_space(dataset_names: Sequence[str], train_dataset, val_dataset) -> Tuple[Dict[str, int], Dict[int, str]]:
-    selected = sorted(set(dataset_names))
+    """Every adapter group shares the same six layout labels.
 
-    # For FUNSD-only runs use the canonical FUNSD BIO tagset.
-    if selected == ["FUNSD"]:
-        return _make_maps(FUNSD_BIO_LABELS)
-
-    labels = set(_iter_segment_labels(train_dataset)) | set(_iter_segment_labels(val_dataset))
-    if not labels:
-        labels = set(LAYOUT_LABELS)
-
-    ordered: List[str] = [label for label in LAYOUT_LABELS if label in labels]
-    extra = sorted(labels - set(ordered))
-    ordered.extend(extra)
-    if not ordered:
-        ordered = list(LAYOUT_LABELS)
-
-    return _make_maps(ordered)
+    A fixed label space keeps adapters comparable (cross-group evaluation) and
+    stops dataset-specific names, such as document-class labels, from becoming
+    extra token classes. Unexpected segment labels are reported, not added.
+    """
+    seen = set(_iter_segment_labels(train_dataset)) | set(_iter_segment_labels(val_dataset))
+    unexpected = seen - set(LAYOUT_LABELS)
+    if unexpected:
+        logger.warning(
+            "[LabelSpace] Ignoring labels outside the layout label space (%s): %s",
+            list(dataset_names), sorted(unexpected),
+        )
+    return _make_maps(LAYOUT_LABELS)
 
 
 def log_dataset_label_distribution(dataset, split_name: str, group_name: str) -> None:

@@ -1,16 +1,20 @@
 """
 finetune/adapter_groups.py
 ==========================
-Central definition of the three LoRA adapter groups.
+Central definition of the LoRA adapter groups.
 
 Every other module that needs to know which datasets belong to which group,
 or which adapter to load for a given schema/document type, imports from here.
 
 Group layout
 ------------
-GROUP_1  (curriculum orders 1-2)  layout-primitive / receipt-like
-GROUP_2  (curriculum orders 3)    structural classification
-GROUP_3  (curriculum orders 4-5)  reasoning-heavy / clause extraction
+GROUP_1  receipt-like documents (CORD, SROIE)
+GROUP_2  forms and multi-domain page layout (FUNSD, DocLayNet)
+
+Only datasets that carry token or region layout labels usable for the
+six-class layout objective are included. The reasoning-style datasets
+(DocVQA, Kleister-NDA, InfographicVQA) have no such labels, so no third group
+is trained.
 
 The SCHEMA_TO_GROUP mapping is used at inference time by AdapterRouter to
 translate a recognised schema name into the correct adapter directory.
@@ -41,21 +45,15 @@ class AdapterGroupSpec:
 ADAPTER_GROUPS: List[AdapterGroupSpec] = [
     AdapterGroupSpec(
         name="group_1",
-        label="Layout-primitive / receipt-like",
-        datasets=["CORD", "SROIE", "SYNTHDOG_EN"],
+        label="Receipt-like documents",
+        datasets=["CORD", "SROIE"],
         curriculum_orders=[1, 2],
     ),
     AdapterGroupSpec(
         name="group_2",
-        label="Structural classification",
-        datasets=["FUNSD", "RVL-CDIP", "DOCLAYNET", "DOCBANK"],
-        curriculum_orders=[3],
-    ),
-    AdapterGroupSpec(
-        name="group_3",
-        label="Reasoning-heavy / clause extraction",
-        datasets=["DOCVQA", "KLEISTER_NDA", "INFOGRAPHICVQA"],
-        curriculum_orders=[4, 5],
+        label="Forms and multi-domain page layout",
+        datasets=["FUNSD", "DOCLAYNET"],
+        curriculum_orders=[2, 3],
     ),
 ]
 
@@ -75,35 +73,11 @@ SCHEMA_TO_GROUP: Dict[str, str] = {
     # Group 1
     "cord_receipt":     "group_1",
     "sroie_invoice":    "group_1",
-    "synthdog_ocr":     "group_1",
 
     # Group 2
     "funsd_form":           "group_2",
-    "rvl_cdip":             "group_2",
     "doclaynet_layout":     "group_2",
-    "docbank_layout":       "group_2",
-    # RVL-CDIP exposes many sub-labels; catch them all
-    "advertisement":        "group_2",
-    "budget":               "group_2",
-    "email":                "group_2",
-    "file_folder":          "group_2",
-    "form":                 "group_2",
-    "handwritten":          "group_2",
-    "invoice":              "group_2",
-    "letter":               "group_2",
-    "memo":                 "group_2",
-    "news_article":         "group_2",
-    "presentation":         "group_2",
-    "questionnaire":        "group_2",
-    "resume":               "group_2",
-    "scientific_publication": "group_2",
-    "scientific_report":    "group_2",
-    "specification":        "group_2",
-
-    # Group 3
-    "docvqa_reasoning":     "group_3",
-    "kleister_nda":         "group_3",
-    "infographic_vqa":      "group_3",
+    "invoice":              "group_1",
 }
 
 # Fallback group when schema is unknown

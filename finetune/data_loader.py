@@ -18,6 +18,10 @@ from normalizers import NORMALIZATION_VERSION, NORMALIZERS, normalize_generic
 
 logger = logging.getLogger(__name__)
 
+# Fixed across training seeds so every run sees the same train/validation split.
+SPLIT_SEED = 42
+VAL_FRACTION = 0.1
+
 
 def _hf_login() -> None:
     """Authenticate with the HF Hub using HF_TOKEN from the environment or .env."""
@@ -156,6 +160,8 @@ def _load_single_dataset(
         load_kwargs["name"] = spec.config_name
     if spec.trust_remote_code:
         load_kwargs["trust_remote_code"] = True
+    if spec.data_files:
+        load_kwargs["data_files"] = spec.data_files
 
     try:
         ds = load_dataset(spec.repo_id, **load_kwargs)
@@ -165,12 +171,14 @@ def _load_single_dataset(
 
     if "train" not in ds:
         only = next(iter(ds.keys()))
-        sp = ds[only].train_test_split(test_size=0.1, seed=42)
+        sp = ds[only].train_test_split(test_size=VAL_FRACTION, seed=SPLIT_SEED)
         ds = {"train": sp["train"], "validation": sp["test"]}
     else:
-        val_key = next((n for n in ("validation", "val", "dev", "test") if n in ds), None)
+        # Never fall back to "test": datasets without a validation split get
+        # one carved from train so test stays untouched until final evaluation.
+        val_key = next((n for n in ("validation", "val", "dev") if n in ds), None)
         if val_key is None:
-            sp = ds["train"].train_test_split(test_size=0.1, seed=42)
+            sp = ds["train"].train_test_split(test_size=VAL_FRACTION, seed=SPLIT_SEED)
             ds = {"train": sp["train"], "validation": sp["test"]}
         else:
             ds = {"train": ds["train"], "validation": ds[val_key]}
@@ -190,11 +198,13 @@ def _load_single_dataset(
     train_ds = ds["train"].map(
         normalize,
         remove_columns=ds["train"].column_names,
+        load_from_cache_file=False,
         desc=f"Normalize {spec.name} train",
     )
     val_ds = ds["validation"].map(
         normalize,
         remove_columns=ds["validation"].column_names,
+        load_from_cache_file=False,
         desc=f"Normalize {spec.name} val",
     )
 
@@ -365,3 +375,39 @@ def build_combined_dataset(
     id2label = {i: label for label, i in label2id.items()}
 
     return train_dataset, val_dataset, label2id, id2label, manifest
+
+
+
+# Held-out evaluation. The official test split of each dataset is never used by
+# build_combined_dataset (training / early stopping), so it is only read here.
+TEST_SPLIT_FILES: Dict[str, Dict[str, str]] = {
+    # One of the six test shards (~800 pages) is enough for a per-dataset cap.
+    "DOCLAYNET": {"test": "data/test-00000-of-00006.parquet"},
+}
+
+
+def load_test_dataset(dataset_names: List[str], max_test_samples: Optional[int] = None):
+    """Normalize the official test split of each dataset and concatenate them."""
+    from datasets import concatenate_datasets, load_dataset
+
+    parts = []
+    for name in dataset_names:
+        spec = DATASET_SPECS[name]
+        kwargs: Dict = {}
+        if spec.config_name:
+            kwargs["name"] = spec.config_name
+        data_files = TEST_SPLIT_FILES.get(name) or spec.data_files
+        if data_files:
+            kwargs["data_files"] = data_files
+        ds = load_dataset(spec.repo_id, split="test", **kwargs)
+        if max_test_samples:
+            ds = ds.select(range(min(max_test_samples, len(ds))))
+        norm_fn = NORMALIZERS.get(name)
+        parts.append(ds.map(
+            norm_fn if norm_fn else (lambda ex, spec=spec: normalize_generic(ex, spec)),
+            remove_columns=ds.column_names,
+            load_from_cache_file=False,
+            desc=f"Normalize {name} test",
+        ))
+        logger.info("[DataLoader] %s test: %d examples", name, len(parts[-1]))
+    return concatenate_datasets(parts)

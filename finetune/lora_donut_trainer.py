@@ -39,7 +39,7 @@ def _make_donut_lora_config(group_name: str):
     except ImportError:
         raise RuntimeError("peft not installed. Run: pip install peft")
 
-    r = 32 if group_name == "group_3" else 16
+    r = 16
     return LoraConfig(
         task_type="SEQ_2_SEQ_LM",
         r=r,

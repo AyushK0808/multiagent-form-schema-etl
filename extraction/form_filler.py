@@ -24,6 +24,7 @@ import torch
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
 from utils.form import FormInstance
 from config.config import get_config
+from utils.llm_cache import cached_call, make_key, record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class FormFiller:
 
     def __init__(
         self,
-        vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+        vision_model: Optional[str] = None,
         adapter_group: str = "group_2",
     ):
         self.config       = get_config()
@@ -73,8 +74,9 @@ class FormFiller:
         self.model_name   = model_cfg.llm_model
         self.temperature  = model_cfg.llm_temperature
         self.max_tokens   = model_cfg.llm_max_tokens
-        self.vision_model = vision_model
+        self.vision_model = vision_model  # None -> the extractor picks the model for the configured backend
         self.adapter_group = adapter_group   # forwarded to LayoutAnalyzer
+        self.last_passes: Dict[str, Dict[str, Any]] = {}   # per-pass outputs of the last populate()
 
         if self.model_name.startswith("ollama/"):
             self.ollama_model = self.model_name.replace("ollama/", "")
@@ -107,8 +109,10 @@ class FormFiller:
         schema: Dict,
         full_text: str = "",
         page_image=None,
+        page_images=None,
     ) -> FormInstance:
         form = FormInstance(schema)
+        pages = list(page_images) if page_images else ([page_image] if page_image is not None else [])
         logger.info("Populating form: %s  (adapter_group=%s)",
                     schema.get("form_name", "Unknown"), self.adapter_group)
 
@@ -117,24 +121,38 @@ class FormFiller:
         # Pass 1 — text LLM
         extracted: Dict[str, Any] = {}
         if document_text.strip():
-            prompt    = self._build_text_prompt(document_text, schema)
-            raw       = self._text_call(prompt)
-            extracted = self._parse_response(raw, schema)
+            # The prompt holds a fixed-size window of text; longer documents are
+            # read window by window and the first non-null answer per field wins.
+            extracted = {name: None for name in schema["fields"]}
+            for window in _text_windows(document_text):
+                if all(v is not None for v in extracted.values()):
+                    break
+                raw    = self._text_call(self._build_text_prompt(window, schema))
+                parsed = self._parse_response(raw, schema)
+                for name, value in parsed.items():
+                    if extracted[name] is None:
+                        extracted[name] = value
             _log_pass_result(extracted, "text LLM")
         else:
             logger.warning("Pass 1 skipped — no document text")
             extracted = {name: None for name in schema["fields"]}
 
+        self.last_passes = {"text": dict(extracted)}
+
         # Pass 2 — vision LLM for null fields
         null_fields = [k for k, v in extracted.items() if v is None]
-        if null_fields and page_image is not None:
+        if null_fields and pages:
             logger.info("Pass 2: vision fallback for %d field(s)", len(null_fields))
-            vision_result = self._vision_extract(page_image, schema, null_fields)
-            for f in null_fields:
-                if vision_result.get(f) is not None:
-                    extracted[f] = vision_result[f]
+            for page in pages:
+                if not null_fields:
+                    break
+                vision_result = self._vision_extract(page, schema, null_fields)
+                for f in null_fields:
+                    if vision_result.get(f) is not None:
+                        extracted[f] = vision_result[f]
+                null_fields = [k for k in null_fields if extracted[k] is None]
             _log_pass_result(extracted, "vision LLM")
-        elif null_fields and page_image is None:
+        elif null_fields and not pages:
             logger.warning("Pass 2 skipped — no page_image provided")
 
         # Pass 3 — sentinel
@@ -162,7 +180,7 @@ class FormFiller:
             "- Never invent values."
         )
         user = (
-            f"DOCUMENT:\n\"\"\"\n{document_text[:4000]}\n\"\"\"\n\n"
+            f"DOCUMENT:\n\"\"\"\n{document_text}\n\"\"\"\n\n"
             f"FIELDS:\n{field_lines}\n\n"
             f"Return JSON with exactly these keys:\n{skeleton}"
         )
@@ -176,11 +194,20 @@ class FormFiller:
 
     def _call_ollama(self, prompt: str) -> str:
         import ollama
-        response = ollama.generate(
-            model=self.ollama_model, prompt=prompt, stream=False,
-            options={"temperature": self.temperature, "num_predict": max(self.max_tokens, 512)},
+
+        def _request() -> str:
+            response = ollama.generate(
+                model=self.ollama_model, prompt=prompt, stream=False,
+                options={"temperature": self.temperature, "num_predict": max(self.max_tokens, 512)},
+            )
+            record_usage("ollama", 1, response.get("prompt_eval_count", 0), response.get("eval_count", 0))
+            return response["response"]
+
+        return cached_call(
+            "ollama_text",
+            make_key(self.ollama_model, prompt, self.temperature, self.max_tokens),
+            _request,
         )
-        return response["response"]
 
     def _call_hf(self, prompt: str) -> str:
         return self._hf(prompt)[0]["generated_text"]
@@ -216,6 +243,17 @@ class FormFiller:
 # ---------------------------------------------------------------------------
 # Module-level helpers  (unchanged)
 # ---------------------------------------------------------------------------
+
+_TEXT_WINDOW_CHARS = 4000
+_MAX_TEXT_WINDOWS = 4
+
+
+def _text_windows(text: str) -> list:
+    """Split text into consecutive windows of at most _TEXT_WINDOW_CHARS characters."""
+    text = text.strip()
+    windows = [text[i:i + _TEXT_WINDOW_CHARS] for i in range(0, len(text), _TEXT_WINDOW_CHARS)]
+    return windows[:_MAX_TEXT_WINDOWS] or [""]
+
 
 def _schema_to_prompt_parts(schema: Dict):
     lines = []
